@@ -1,11 +1,12 @@
 package com.example.honapp.packet.header
 
 import com.example.honapp.packet.TransportProtocol
+import org.pcap4j.util.ByteArrays
 import java.net.InetAddress
 import java.nio.ByteBuffer
 import kotlin.experimental.and
 
-class IpV4Header() : Header() {
+class IpV4Header() {
     var versionAndIHL: Byte? = null
     var version: Byte? = null
     var ihl: Byte? = null
@@ -23,6 +24,7 @@ class IpV4Header() : Header() {
 
     var sourceAddress: InetAddress? = null
     var destinationAddress: InetAddress? = null
+
 
     constructor(buffer: ByteBuffer) : this() {
         versionAndIHL = buffer.get();

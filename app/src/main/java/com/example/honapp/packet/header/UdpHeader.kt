@@ -2,7 +2,7 @@ package com.example.honapp.packet.header
 
 import java.nio.ByteBuffer
 
-class UdpHeader() : Header() {
+class UdpHeader() {
     var sourcePort: Int? = null
     var destinationPort: Int? = null
 

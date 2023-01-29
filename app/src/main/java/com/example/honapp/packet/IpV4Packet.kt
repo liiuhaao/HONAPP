@@ -1,32 +1,16 @@
 package com.example.honapp.packet
 
-import com.example.honapp.packet.header.Header
 import com.example.honapp.packet.header.IpV4Header
 import java.nio.ByteBuffer
 
-class IpV4Packet() : Packet() {
-    private var header: IpV4Header? = null
-    private var payload: Packet? = null
+class IpV4Packet : Packet {
+    var header: IpV4Header? = null
+    var payload: Packet? = null
 
-    constructor(buffer: ByteBuffer) : this() {
+    constructor(buffer: ByteBuffer, length: Int) : this(buffer, 0, length)
+    constructor(buffer: ByteBuffer, offset: Int, length: Int) : super(buffer, offset, length) {
         header = IpV4Header(buffer)
-        payload = when (this.header!!.protocol) {
-            TransportProtocol.TCP -> TcpPacket(buffer)
-            TransportProtocol.UDP -> UdpPacket(buffer)
-            else -> null
-        }
-    }
-
-    override fun getHeader(): Header? {
-        return header
-    }
-
-    override fun getPayload(): Packet? {
-        return payload
-    }
-
-    fun getProtocol(): TransportProtocol? {
-        return this.header?.protocol
+        payload = Packet(buffer, offset + header!!.headerLength!!, length)
     }
 
     override fun toString(): String {

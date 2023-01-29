@@ -3,7 +3,7 @@ package com.example.honapp.packet.header
 import java.nio.ByteBuffer
 import kotlin.experimental.and
 
-class TcpHeader() : Header() {
+class TcpHeader() {
     companion object {
         const val FIN = 0x01
         const val SYN = 0x02

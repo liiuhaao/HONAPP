@@ -5,37 +5,38 @@ import android.content.Intent
 import android.net.VpnService
 import android.os.ParcelFileDescriptor
 import android.util.Log
+import com.example.honapp.packet.IpV4Packet
 import kotlinx.coroutines.GlobalScope
 import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.selects.whileSelect
 import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.net.DatagramPacket
-import java.net.DatagramSocket
 import java.net.InetAddress
 import java.nio.ByteBuffer
 
 class HONVpnService(
     private val address: InetAddress = InetAddress.getByName("202.120.87.33"),
-//    private val address: InetAddress = InetAddress.getByName("106.75.247.84"),
     private val port: Int = 54345
-) :
-    VpnService() {
+) : VpnService() {
     companion object {
         private const val TAG = "HONVpnService"
     }
 
+    private val closeCh = Channel<Unit>()
+    private val inputCh = Channel<IpV4Packet>()
+
     private var vpnInterface: ParcelFileDescriptor? = null
 
-    private val closeCh = Channel<Unit>()
-    private val inputCh = Channel<DatagramPacket>()
 
     private var alive = true
     private var vpnInputStream: FileInputStream? = null
     private var vpnOutputStream: FileOutputStream? = null
 
+    private var udpVpnService: UdpVpnService? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent?.getStringExtra("COMMAND") == "STOP") {
@@ -47,6 +48,8 @@ class HONVpnService(
     override fun onCreate() {
         super.onCreate()
         setupVpn()
+        udpVpnService = UdpVpnService(this, inputCh, closeCh, address, port)
+        udpVpnService!!.start()
         startVpn()
     }
 
@@ -63,13 +66,13 @@ class HONVpnService(
     }
 
 
-    private suspend fun vpnRunLoop() {
+    private suspend fun vpnRunLoop() = coroutineScope {
         Log.d(TAG, "Running loop...")
         // Receive from local and send to remote network.
         vpnInputStream = FileInputStream(vpnInterface!!.fileDescriptor)
         // Receive from remote and send to local network.
         vpnOutputStream = FileOutputStream(vpnInterface!!.fileDescriptor)
-        GlobalScope.launch {
+        launch {
             loop@ while (alive) {
                 val buffer = ByteBuffer.allocate(65536)
                 val readBytes = vpnInputStream!!.read(buffer.array())
@@ -77,40 +80,16 @@ class HONVpnService(
                     delay(100)
                     continue@loop
                 }
-
-//                val packet = DatagramPacket(buffer.array(), readBytes)
-//                Log.d(TAG, "UDP Request ${packet.length}: ${packet.data}")
-
                 val packet = DatagramPacket(buffer.array(), readBytes, address, port)
-                val socketSend = DatagramSocket()
-                protect(socketSend)
-                try {
-                    socketSend.send(packet)
-                    Log.d("$TAG Request", "lenght=${packet.length}, data=${packet.data}")
-                } catch (e: Exception) {
-                    e.printStackTrace()
-                    Log.e("$TAG Request", "Request Send Error: $e")
-                }
-                socketSend.close()
-
-//                val ipV4Packet = IpV4Packet(buffer)
-//                when (ipV4Packet.getProtocol()) {
-//                    TransportProtocol.UDP -> {
-//                        Log.d(TAG, "UDP REQUEST\n${ipV4Packet}")
-//                    }
-//                    TransportProtocol.TCP -> {
-//                        Log.d(TAG, "TCP REQUEST\n${ipV4Packet}")
-//                    }
-//                    else -> {
-//                        Log.w(TAG, "Unknown packet type")
-//                    }
-//                }
+                val ipV4Packet = IpV4Packet(buffer, readBytes)
+                Log.d(TAG, "REQUEST: $ipV4Packet")
+                udpVpnService!!.outputChannel.send(ipV4Packet)
             }
         }
         whileSelect {
-            inputCh.onReceive { value ->
-                Log.d("$TAG Response", "$value")
-                vpnOutputStream!!.write(value.data)
+            inputCh.onReceive { packet ->
+                Log.d(TAG, "RESPONSE: ${packet}")
+                vpnOutputStream!!.write(packet.rawData)
                 true
             }
             closeCh.onReceiveCatching {
@@ -122,8 +101,10 @@ class HONVpnService(
 
     private fun stopVpn() {
         alive = false
-        closeCh.close()
         vpnInterface?.close()
+        vpnInputStream!!.close()
+        vpnOutputStream!!.close()
+        udpVpnService!!.stop()
         stopSelf()
         Log.i(TAG, "Stopped VPN")
     }
