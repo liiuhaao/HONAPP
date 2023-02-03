@@ -14,7 +14,6 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.selects.whileSelect
 import java.io.FileInputStream
 import java.io.FileOutputStream
-import java.net.DatagramPacket
 import java.net.InetAddress
 import java.nio.ByteBuffer
 
@@ -30,7 +29,6 @@ class HONVpnService(
     private val inputCh = Channel<IpV4Packet>()
 
     private var vpnInterface: ParcelFileDescriptor? = null
-
 
     private var alive = true
     private var vpnInputStream: FileInputStream? = null
@@ -80,15 +78,14 @@ class HONVpnService(
                     delay(100)
                     continue@loop
                 }
-                val packet = DatagramPacket(buffer.array(), readBytes, address, port)
-                val ipV4Packet = IpV4Packet(buffer, readBytes)
-                Log.d(TAG, "REQUEST: $ipV4Packet")
-                udpVpnService!!.outputChannel.send(ipV4Packet)
+                val packet = IpV4Packet(buffer, readBytes)
+                Log.d(TAG, "REQUEST: $packet")
+                udpVpnService!!.outputChannel.send(packet)
             }
         }
         whileSelect {
             inputCh.onReceive { packet ->
-                Log.d(TAG, "RESPONSE: ${packet}")
+                Log.d(TAG, "RESPONSE: $packet")
                 vpnOutputStream!!.write(packet.rawData)
                 true
             }

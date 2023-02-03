@@ -1,6 +1,5 @@
 package com.example.honapp
 
-//import org.pcap4j.packet.IpV4Packet
 import android.net.VpnService
 import android.util.Log
 import com.example.honapp.packet.IpV4Packet
@@ -20,8 +19,8 @@ import java.nio.channels.Selector
 
 class UdpVpnService(
     val tunnel: VpnService,
-    val inputChannel: Channel<IpV4Packet>,
-    val closeChannel: Channel<Unit>,
+    private val inputChannel: Channel<IpV4Packet>,
+    private val closeChannel: Channel<Unit>,
     private val address: InetAddress,
     private val port: Int,
 ) {
@@ -32,8 +31,9 @@ class UdpVpnService(
     val outputChannel = Channel<IpV4Packet>()
 
     private val selector = Selector.open()
-    private val mux = Mutex()
+    private val selectorMux = Mutex()
     private val cache = mutableMapOf<String, Connection?>()
+    private val mux = Mutex()
 
     fun start() {
         GlobalScope.launch {
@@ -59,7 +59,9 @@ class UdpVpnService(
         var alive = true
         GlobalScope.launch {
             loop@ while (alive) {
+                selectorMux.lock()
                 val n = selector.selectNow()
+                selectorMux.unlock()
                 if (n == 0) {
                     delay(100)
                     continue@loop
@@ -69,6 +71,7 @@ class UdpVpnService(
         }
         whileSelect {
             readyChannel.onReceive {
+                selectorMux.lock()
                 val keys = selector.selectedKeys()
                 val it = keys.iterator()
                 while (it.hasNext()) {
@@ -77,40 +80,44 @@ class UdpVpnService(
                         it.remove()
                         val channel = key.channel() as DatagramChannel
                         val buffer = ByteBuffer.allocate(65536)
+
                         val readBytes = channel.read(buffer)
-                        val packet = IpV4Packet(buffer, readBytes)
-                        inputChannel.send(packet)
+                        if (readBytes > 0) {
+                            val packet = IpV4Packet(buffer, readBytes)
+                            inputChannel.send(packet)
+                        }
                     }
                 }
+                selectorMux.unlock()
                 true
+            }
+            closeChannel.onReceiveCatching {
+                false
             }
         }
         alive = false
     }
 
-    private suspend fun serveOutput(ipV4Packet: IpV4Packet) {
-        val destinationAddress = ipV4Packet.header!!.destinationAddress
-        val sourceAddress = ipV4Packet.header!!.sourceAddress
+    private suspend fun serveOutput(packet: IpV4Packet) {
+        val destinationAddress = packet.header!!.destinationAddress
+        val sourceAddress = packet.header!!.sourceAddress
 
         val sourceAndDestination = "${sourceAddress}:${destinationAddress}"
         var conn: Connection? = null
         mux.lock()
-        try {
-            conn = cache.getOrPut(sourceAndDestination) {
-                val newConn = Connection(sourceAndDestination)
-                newConn
-            }
-            if (!conn!!.isOpen && !conn.open()) {
-                conn.close()
-                cache.remove(sourceAndDestination)
-                return
-            }
-            val buff = ByteBuffer.wrap(ipV4Packet.rawData!!)
-            while (buff.hasRemaining()) {
-                conn.channel!!.write(buff)
-            }
-        } finally {
-            mux.unlock()
+        conn = cache.getOrPut(sourceAndDestination) {
+            val newConn = Connection(sourceAndDestination)
+            newConn
+        }
+        if (!conn!!.isOpen && !conn.open()) {
+            conn.close()
+            cache.remove(sourceAndDestination)
+            return
+        }
+        mux.unlock()
+        val buffer = ByteBuffer.wrap(packet.rawData!!)
+        while (buffer.hasRemaining()) {
+            conn.channel!!.write(buffer)
         }
     }
 
