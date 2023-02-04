@@ -83,6 +83,8 @@ class UdpVpnService(
 
                         val readBytes = channel.read(buffer)
                         if (readBytes > 0) {
+                            // TODO: Decode
+                            // TODO: Aggregate
                             val packet = IpV4Packet(buffer, readBytes)
                             inputChannel.send(packet)
                         }
@@ -98,6 +100,8 @@ class UdpVpnService(
         alive = false
     }
 
+    // TODO: Encode
+    // TODO: Choose fd
     private suspend fun serveOutput(packet: IpV4Packet) {
         val destinationAddress = packet.header!!.destinationAddress
         val sourceAddress = packet.header!!.sourceAddress
