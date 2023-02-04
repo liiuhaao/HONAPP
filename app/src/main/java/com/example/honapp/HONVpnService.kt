@@ -18,13 +18,14 @@ import java.net.InetAddress
 import java.nio.ByteBuffer
 
 class HONVpnService(
-    private val address: InetAddress = InetAddress.getByName("202.120.87.33"),
+    private val address: String = "202.120.87.33",
     private val port: Int = 54345
 ) : VpnService() {
     companion object {
         private const val TAG = "HONVpnService"
     }
 
+    private val inetAddress = InetAddress.getByName(address)
     private val closeCh = Channel<Unit>()
     private val inputCh = Channel<IpV4Packet>()
 
@@ -46,14 +47,14 @@ class HONVpnService(
     override fun onCreate() {
         super.onCreate()
         setupVpn()
-        udpVpnService = UdpVpnService(this, inputCh, closeCh, address, port)
+        udpVpnService = UdpVpnService(this, inputCh, closeCh, inetAddress, port)
         udpVpnService!!.start()
         startVpn()
     }
 
     private fun setupVpn() {
         val builder =
-            Builder().addAddress("10.0.2.15", 24).addDnsServer("8.8.8.8").addRoute("0.0.0.0", 0)
+            Builder().addAddress("10.10.0.15", 24).addDnsServer("8.8.8.8").addRoute("0.0.0.0", 0)
                 .setSession(TAG)
         vpnInterface = builder.establish()
         Log.d(TAG, "VPN interface has established!")
