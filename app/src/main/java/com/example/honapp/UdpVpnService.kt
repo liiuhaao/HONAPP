@@ -3,11 +3,8 @@ package com.example.honapp
 import android.net.VpnService
 import android.util.Log
 import com.example.honapp.packet.IpV4Packet
-import kotlinx.coroutines.GlobalScope
+import kotlinx.coroutines.*
 import kotlinx.coroutines.channels.Channel
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.launch
-import kotlinx.coroutines.selects.whileSelect
 import kotlinx.coroutines.sync.Mutex
 import java.io.IOException
 import java.net.InetAddress
@@ -20,7 +17,6 @@ import java.nio.channels.Selector
 class UdpVpnService(
     val tunnel: VpnService,
     private val inputChannel: Channel<IpV4Packet>,
-    private val closeChannel: Channel<Unit>,
     private val address: InetAddress,
     private val port: Int,
 ) {
@@ -31,73 +27,54 @@ class UdpVpnService(
     val outputChannel = Channel<IpV4Packet>()
 
     private val selector = Selector.open()
-    private val selectorMux = Mutex()
     private val cache = mutableMapOf<String, Connection?>()
     private val mux = Mutex()
+    var alive = true
 
     fun start() {
-        GlobalScope.launch {
-            whileSelect {
-                outputChannel.onReceive { value ->
-                    // received package(local >> remote)
-                    GlobalScope.launch { serveOutput(value) }
-                    true
-                }
-                closeChannel.onReceiveCatching {
-                    false
-                }
-            }
-            Log.d(TAG, "exit main loop")
-        }
+        GlobalScope.launch { outputLoop() }
         GlobalScope.launch { readLoop() }
-        // receive data from the remote server.
+
         Log.i(TAG, "start service")
     }
 
-    private suspend fun readLoop() {
-        val readyChannel = Channel<Int>()
-        var alive = true
-        GlobalScope.launch {
-            loop@ while (alive) {
-                selectorMux.lock()
-                val n = selector.selectNow()
-                selectorMux.unlock()
-                if (n == 0) {
-                    delay(100)
-                    continue@loop
-                }
-                readyChannel.send(n)
-            }
+    private suspend fun outputLoop() {
+        loop@ while (alive) {
+            val packet = outputChannel.receive()
+            serveOutput(packet)
         }
-        whileSelect {
-            readyChannel.onReceive {
-                selectorMux.lock()
-                val keys = selector.selectedKeys()
-                val it = keys.iterator()
-                while (it.hasNext()) {
-                    val key = it.next()
-                    if (key.isValid && key.isReadable) {
-                        it.remove()
-                        val channel = key.channel() as DatagramChannel
-                        val buffer = ByteBuffer.allocate(65536)
+    }
 
-                        val readBytes = channel.read(buffer)
-                        if (readBytes > 0) {
-                            // TODO: Decode
-                            // TODO: Aggregate
-                            val packet = IpV4Packet(buffer, readBytes)
-                            inputChannel.send(packet)
-                        }
+    private suspend fun readLoop() {
+        loop@ while (alive) {
+            val n = withContext(Dispatchers.IO) {
+                selector.selectNow()
+            }
+            if (n <= 0) {
+                delay(100)
+                continue@loop
+            }
+            val keys = selector.selectedKeys()
+            val it = keys.iterator()
+            while (it.hasNext()) {
+                val key = it.next()
+                if (key.isValid && key.isReadable) {
+                    it.remove()
+                    val channel = key.channel() as DatagramChannel
+                    val buffer = ByteBuffer.allocate(65536)
+
+                    val readBytes = withContext(Dispatchers.IO) {
+                        channel.read(buffer)
+                    }
+                    if (readBytes > 0) {
+                        // TODO: Decode
+                        // TODO: Aggregate
+                        val packet = IpV4Packet(buffer, readBytes)
+                        inputChannel.send(packet)
                     }
                 }
-                selectorMux.unlock()
-                true
-            }
-            closeChannel.onReceiveCatching {
-                false
             }
         }
-        alive = false
     }
 
     // TODO: Encode
@@ -126,6 +103,7 @@ class UdpVpnService(
     }
 
     fun stop() {
+        alive = false
         val it = cache.iterator()
         while (it.hasNext()) {
             it.next().value!!.close()

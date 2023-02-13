@@ -18,7 +18,8 @@ import java.net.InetAddress
 import java.nio.ByteBuffer
 
 class HONVpnService(
-    private val address: String = "202.120.87.33",
+//    address: String = "202.120.87.33",
+    address: String = "106.75.241.159",
     private val port: Int = 54345
 ) : VpnService() {
     companion object {
@@ -47,7 +48,7 @@ class HONVpnService(
     override fun onCreate() {
         super.onCreate()
         setupVpn()
-        udpVpnService = UdpVpnService(this, inputCh, closeCh, inetAddress, port)
+        udpVpnService = UdpVpnService(this, inputCh, inetAddress, port)
         udpVpnService!!.start()
         startVpn()
     }
@@ -99,6 +100,7 @@ class HONVpnService(
 
     private fun stopVpn() {
         alive = false
+        closeCh.close()
         vpnInterface?.close()
         vpnInputStream!!.close()
         vpnOutputStream!!.close()
