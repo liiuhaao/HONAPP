@@ -5,6 +5,6 @@ project("reed solomon")
 
 find_library(log-lib log)
 
-set(SRCLIST main.c fec.c rs.c)
+set(SRCLIST main.c rs.c)
 add_library(rs SHARED ${SRCLIST})
 target_link_libraries(rs ${log-lib})

@@ -34,7 +34,7 @@ class HONVpnService(
     private var vpnInputStream: FileInputStream? = null
     private var vpnOutputStream: FileOutputStream? = null
 
-    private var udpVpnService: UdpVpnService? = null
+    private var honFecService: HONFecService? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent?.getStringExtra("COMMAND") == "STOP") {
@@ -46,8 +46,8 @@ class HONVpnService(
     override fun onCreate() {
         super.onCreate()
         setupVpn()
-        udpVpnService = UdpVpnService(this, inputCh, inetAddress, port, drop)
-        udpVpnService!!.start()
+        honFecService = HONFecService(this, inputCh, inetAddress, port, drop)
+        honFecService!!.start()
         startVpn()
     }
 
@@ -62,7 +62,6 @@ class HONVpnService(
     private fun startVpn() {
         GlobalScope.launch { vpnRunLoop() }
     }
-
 
     private suspend fun vpnRunLoop() = coroutineScope {
         Log.d(TAG, "Running loop...")
@@ -82,7 +81,7 @@ class HONVpnService(
                 }
                 val packet = IpV4Packet(buffer, readBytes)
                 Log.d(TAG, "REQUEST: $packet")
-                udpVpnService!!.outputChannel.send(packet)
+                honFecService!!.outputChannel.send(packet)
             }
         }
         whileSelect {
@@ -106,7 +105,7 @@ class HONVpnService(
         vpnInterface?.close()
         vpnInputStream!!.close()
         vpnOutputStream!!.close()
-        udpVpnService!!.stop()
+        honFecService!!.stop()
         stopSelf()
         Log.i(TAG, "Stopped VPN")
     }

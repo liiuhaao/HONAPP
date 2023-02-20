@@ -18,72 +18,33 @@
 // 定义info信息
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO,LOG_TAG,__VA_ARGS__)
 
-JNIEXPORT jobjectArray JNICALL
-Java_com_example_honapp_UdpVpnService_encodef(JNIEnv *env, jobject thiz, jint k, jint n,
-                                              jbyteArray send_array, jint send_size,
-                                              jint symbol_size) {
 
-    int len = (send_size + k - 1) / k;
-    jbyte *array = malloc((len + 1) * sizeof(jbyte));
-    memset(array, 0, sizeof(array));
-    (*env)->GetByteArrayRegion(env, send_array, 0, send_size, array);
-
-
-    char arr[n][symbol_size];
-    for (int i = 0; i < k; i++) {
-        memcpy(arr[i], array + i * symbol_size, symbol_size);
-    }
-    char *data[n];
-    for (int i = 0; i < k; i++) {
-        data[i] = arr[i];
-    }
-
-
-    rs_encode2(k, n, data, symbol_size);
-
-
-    jclass cls = (*env)->FindClass(env, "[B");
-    jobjectArray res_data = (*env)->NewObjectArray(env, n, cls, NULL);
-    return res_data;
-
-    for (int i = 0; i < n; i++) {
-        jbyteArray symbol = (*env)->NewByteArray(env, symbol_size);
-        jbyte *buf = (*env)->GetByteArrayElements(env, symbol, NULL);
-        strcpy(buf, data[i]);
-        (*env)->ReleaseByteArrayElements(env, symbol, buf, 0);
-    }
-    return res_data;
-}
-
-void log_data(char **data, char *tag, int n, int symbol_size) {
-    LOGD("--------%s data start------------symbol_size=%d", tag, symbol_size);
+void log_data(unsigned char **data_block, char *tag, int block_num, int block_size) {
+    LOGD("--------%s data_block start------------block_size=%d", tag, block_size);
     char log[2000 * 4] = "";
     int pos = 0;
-    for (int i = 0; i < n; i++) {
-        if (!data[i]) {
+    for (int i = 0; i < block_num; i++) {
+        if (!data_block[i]) {
             LOGD("null");
             pos = 0;
             continue;
         }
-        for (int j = 0; j < symbol_size; j++) {
-            int tmp = data[i][j];
+        for (int j = 0; j < block_size; j++) {
+            int tmp = data_block[i][j];
             if (tmp < 0) {
                 log[pos++] = '-';
                 tmp = -tmp;
             }
-//            LOGD("i=%d, j=%d 100 tmp=%d", i, j, tmp);
             if (tmp >= 100) {
                 log[pos++] = tmp / 100 + '0';
             }
             tmp -= tmp / 100 * 100;
-//            LOGD("i=%d, j=%d 10 tmp=%d", i, j, tmp);
             if (tmp >= 10) {
                 log[pos++] = tmp / 10 + '0';
             }
             tmp -= tmp / 10 * 10;
-//            LOGD("i=%d, j=%d 1 tmp=%d", i, j, tmp);
             log[pos++] = tmp + '0';
-            if (j == symbol_size - 1) {
+            if (j == block_size - 1) {
                 log[pos] = 0;
                 LOGD("%s", log);
                 pos = 0;
@@ -91,89 +52,86 @@ void log_data(char **data, char *tag, int n, int symbol_size) {
                 log[pos++] = ',';
             }
         }
-        log[symbol_size * 2 + 1] = 0;
+        log[block_size * 2 + 1] = 0;
     }
     log[pos] = 0;
-    LOGD("--------%s data end------------", tag);
+    LOGD("--------%s data_block end------------", tag);
 }
 
 JNIEXPORT jobjectArray JNICALL
-Java_com_example_honapp_UdpVpnService_encode(JNIEnv *env, jobject thiz, jint k, jint n,
-                                             jobject send_buffer, jint symbol_size) {
+Java_com_example_honapp_HONFecService_encode(JNIEnv *env, jobject thiz, jint data_num,
+                                             jint block_num,
+                                             jobject send_buffer, jint block_size) {
 
-    jbyte *pBuffer = (jbyte *) ((*env)->GetDirectBufferAddress(env, send_buffer));
+    jbyte *buffer = (jbyte *) ((*env)->GetDirectBufferAddress(env, send_buffer));
 
-    char arr[n][symbol_size];
+    jbyte arr[block_num][block_size];
     memset(arr, 0, sizeof(arr));
-    for (int i = 0; i < k; i++) {
-        memcpy(arr[i], pBuffer + i * symbol_size, symbol_size);
+    unsigned char *data_blocks[block_num];
+    for (int i = 0; i < block_num; i++) {
+        if (i < data_num) {
+            memcpy(arr[i], buffer + i * block_size, block_size);
+        }
+        data_blocks[i] = (unsigned char *) arr[i];
     }
 
-//    char a[15][100] =
-//            {
-//                    {69,  0,   0,    40, 1},
-//                    {78,  64,  0,    64, 6},
-//                    {29,  10,  10,   0,  2},
-//                    {15,  8,   8,    8,  8},
-//                    {-96, -80, 3,    85, 61},
-//                    {4,   114, -121, 25, 57},
-//                    {53,  66,  80,   16, -1},
-//                    {-1,  -15, -87,  0,  0},
-//            };
-//    char arr[n][symbol_size];
-//    memset(arr, 0, sizeof(arr));
-//    for (int i = 0; i < k; i++) {
-//        memcpy(arr[i], a[i], symbol_size);
-//    }
+//    log_data(data_blocks, "origin", block_num, block_size);
 
-    char *data[n];
-    for (int i = 0; i < n; i++) {
-        data[i] = arr[i];
-    }
+    reed_solomon *rs = reed_solomon_new(data_num, block_num - data_num);
+    reed_solomon_encode2(rs, data_blocks, block_num, block_size);
 
-//    log_data(data, "origin", n, symbol_size);
-
-    rs_encode2(k, n, data, symbol_size);
-
-
-    log_data(data, "encode", n, symbol_size);
+//    log_data(data_blocks, "encode", block_num, block_size);
 
     jclass cls = (*env)->FindClass(env, "[B");
-    jobjectArray res_data = (*env)->NewObjectArray(env, n, cls, NULL);
+    jobjectArray res_data = (*env)->NewObjectArray(env, block_num, cls, NULL);
 
-    for (int i = 0; i < n; i++) {
-        jbyteArray symbol = (*env)->NewByteArray(env, symbol_size);
-        (*env)->SetByteArrayRegion(env, symbol, 0, symbol_size, (jbyte *) data[i]);
-        (*env)->SetObjectArrayElement(env, res_data, i, symbol);
+    for (int i = 0; i < block_num; i++) {
+        jbyteArray block = (*env)->NewByteArray(env, block_size);
+        (*env)->SetByteArrayRegion(env, block, 0, block_size, (jbyte *) data_blocks[i]);
+        (*env)->SetObjectArrayElement(env, res_data, i, block);
     }
     return res_data;
 }
 
 
 JNIEXPORT jobjectArray JNICALL
-Java_com_example_honapp_UdpVpnService_decode(JNIEnv *env, jobject thiz, jint k, jint n,
-                                             jobjectArray encode_data, jint symbol_size) {
-    jbyte arr[n][symbol_size];
-    char *data[n];
-    for (int i = 0; i < n; i++) {
-        jbyteArray symbol = (*env)->GetObjectArrayElement(env, encode_data, i);
-        if (symbol) {
-            (*env)->GetByteArrayRegion(env, symbol, 0, symbol_size, arr[i]);
-            data[i] = (char *) arr[i];
+Java_com_example_honapp_HONFecService_decode(JNIEnv *env, jobject thiz, jint data_num,
+                                             jint block_num,
+                                             jobjectArray encode_data, jint block_size) {
+    jbyte arr[block_num][block_size];
+    unsigned char *data_blocks[block_num];
+    unsigned char marks[block_num];
+    memset(marks, 1, block_num);
+    for (int i = 0; i < block_num; i++) {
+        jbyteArray block = (*env)->GetObjectArrayElement(env, encode_data, i);
+        if (block) {
+            (*env)->GetByteArrayRegion(env, block, 0, block_size, arr[i]);
+            data_blocks[i] = (unsigned char *) arr[i];
         } else {
-            data[i] = NULL;
+            data_blocks[i] = (unsigned char *) arr[i];
+            marks[i] = 0;
         }
     }
-    log_data((char **) data, "Before Decode", n, symbol_size);
-    rs_decode2(k, n, (char **) data, symbol_size);
-    log_data((char **) data, "After Decode", n, symbol_size);
+
+//    log_data((char **) data_blocks, "Before Decode", block_num, block_size);
+
+    reed_solomon *rs = reed_solomon_new(data_num, block_num - data_num);
+    reed_solomon_reconstruct(rs, data_blocks, marks, block_num,
+                             block_size);
+
+//    log_data((char **) data_blocks, "After Decode", block_num, block_size);
 
     jclass cls = (*env)->FindClass(env, "[B");
-    jobjectArray res_data = (*env)->NewObjectArray(env, k, cls, NULL);
-    for (int i = 0; i < k; i++) {
-        jbyteArray symbol = (*env)->NewByteArray(env, symbol_size);
-        (*env)->SetByteArrayRegion(env, symbol, 0, symbol_size, (jbyte *) data[i]);
+    jobjectArray res_data = (*env)->NewObjectArray(env, data_num, cls, NULL);
+    for (int i = 0; i < data_num; i++) {
+        jbyteArray symbol = (*env)->NewByteArray(env, block_size);
+        (*env)->SetByteArrayRegion(env, symbol, 0, block_size, (jbyte *) data_blocks[i]);
         (*env)->SetObjectArrayElement(env, res_data, i, symbol);
     }
     return res_data;
+}
+
+JNIEXPORT void JNICALL
+Java_com_example_honapp_HONFecService_fecInit(JNIEnv *env, jobject thiz) {
+    fec_init();
 }
