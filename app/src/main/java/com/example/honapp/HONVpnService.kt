@@ -6,11 +6,8 @@ import android.net.VpnService
 import android.os.ParcelFileDescriptor
 import android.util.Log
 import com.example.honapp.packet.IpV4Packet
-import kotlinx.coroutines.GlobalScope
+import kotlinx.coroutines.*
 import kotlinx.coroutines.channels.Channel
-import kotlinx.coroutines.coroutineScope
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.launch
 import kotlinx.coroutines.selects.whileSelect
 import java.io.FileInputStream
 import java.io.FileOutputStream
@@ -20,7 +17,8 @@ import java.nio.ByteBuffer
 class HONVpnService(
 //    address: String = "202.120.87.33",
     address: String = "106.75.241.159",
-    private val port: Int = 54345
+    private val port: Int = 54345,
+    private val drop: Int = 0,
 ) : VpnService() {
     companion object {
         private const val TAG = "HONVpnService"
@@ -48,7 +46,7 @@ class HONVpnService(
     override fun onCreate() {
         super.onCreate()
         setupVpn()
-        udpVpnService = UdpVpnService(this, inputCh, inetAddress, port)
+        udpVpnService = UdpVpnService(this, inputCh, inetAddress, port, drop)
         udpVpnService!!.start()
         startVpn()
     }
@@ -75,7 +73,9 @@ class HONVpnService(
         launch {
             loop@ while (alive) {
                 val buffer = ByteBuffer.allocate(65536)
-                val readBytes = vpnInputStream!!.read(buffer.array())
+                val readBytes = withContext(Dispatchers.IO) {
+                    vpnInputStream!!.read(buffer.array())
+                }
                 if (readBytes <= 0) {
                     delay(100)
                     continue@loop
@@ -88,7 +88,9 @@ class HONVpnService(
         whileSelect {
             inputCh.onReceive { packet ->
                 Log.d(TAG, "RESPONSE: $packet")
-                vpnOutputStream!!.write(packet.rawData)
+                withContext(Dispatchers.IO) {
+                    vpnOutputStream!!.write(packet.rawData)
+                }
                 true
             }
             closeCh.onReceiveCatching {

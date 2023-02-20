@@ -19,5 +19,15 @@ open class Packet() {
         sb.append('}');
         return sb.toString();
     }
+
+    fun rawDataString(): String {
+        val sb = StringBuilder("rawData{")
+        for (i in rawData!!) {
+            sb.append(i)
+            sb.append(",")
+        }
+        sb.append('}');
+        return sb.toString();
+    }
 }
 

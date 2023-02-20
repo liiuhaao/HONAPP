@@ -1,7 +1,6 @@
 package com.example.honapp.packet.header
 
 import com.example.honapp.packet.TransportProtocol
-import org.pcap4j.util.ByteArrays
 import java.net.InetAddress
 import java.nio.ByteBuffer
 import kotlin.experimental.and
