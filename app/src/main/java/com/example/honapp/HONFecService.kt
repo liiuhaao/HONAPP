@@ -34,13 +34,13 @@ class HONFecService(
     val outputChannel = Channel<IpV4Packet>()
 
     private val selector = Selector.open()
-    var alive = true
+    private var alive = true
 
     private val maxBlockSize = 1500 - 20 - 8 - 24 // 1448
     private val maxK = 32
     private val maxSendBufSize = maxBlockSize * maxK // 46336
 
-    var channel: DatagramChannel? = null
+    private var channel: DatagramChannel? = null
 
     @OptIn(DelicateCoroutinesApi::class)
     fun start() {
@@ -84,7 +84,7 @@ class HONFecService(
         val sendBuf = ByteBuffer.allocateDirect(65536)
         var sendNum = 0
         loop@ while (alive) {
-            val packet = withTimeoutOrNull(timeOut / ((sendNum + 1) * (sendNum + 1))) {
+            val packet = withTimeoutOrNull(timeOut / (sendNum + 1)) {
                 outputChannel.receive()
             }
             if (packet == null) {
@@ -98,9 +98,9 @@ class HONFecService(
                     sendBuf.flip()
                     buf.put(sendBuf)
                     sendBuf.flip()
+                    launch { serveOutput(buf) }
                     sendBuf.clear()
                     sendNum = 0
-                    launch { serveOutput(buf) }
 
                 }
             } else {
@@ -109,19 +109,18 @@ class HONFecService(
                 }
                 if (sendBuf.position() + packet.rawData!!.size >= maxSendBufSize) {
                     Log.d(
-                        TAG,
-                        "FULL: send sendBuf.position=${sendBuf.position()}, sendNum=$sendNum"
+                        TAG, "FULL: send sendBuf.position=${sendBuf.position()}, sendNum=$sendNum"
                     )
 
                     val buf = ByteBuffer.allocateDirect(65536)
                     sendBuf.flip()
                     buf.put(sendBuf)
                     sendBuf.flip()
+
+                    launch { serveOutput(sendBuf) }
+
                     sendBuf.clear()
                     sendNum = 0
-
-                    launch { serveOutput(buf) }
-
                 }
                 sendBuf.put(packet.rawData!!)
                 sendNum++
@@ -162,22 +161,32 @@ class HONFecService(
         }
     }
 
-    private suspend fun serveOutput(sendBuf: ByteBuffer) {
+    private suspend fun serveOutput(sendBuf: ByteBuffer) = coroutineScope {
         val dataSize = sendBuf.position()
         val blockSize = if (dataSize > maxBlockSize) maxBlockSize else dataSize
         val dataNum = (dataSize + blockSize - 1) / blockSize
         val blockNum = max(dataNum + 1, ceil(dataNum * 0.2).toInt())
 
         val dataBlocks = encode(dataNum, blockNum, sendBuf, blockSize)
+        launch { sendDataBlocks(dataBlocks, blockNum, dataNum, blockSize, dataSize) }
+    }
+
+    private suspend fun sendDataBlocks(
+        dataBlocks: Array<ByteArray>, blockNum: Int, dataNum: Int, blockSize: Int, dataSize: Int
+    ) = coroutineScope {
         val hashCode = dataBlocks.hashCode()
         for (index in 0 until blockNum) {
             if ((1..100).random() <= drop) {
                 continue
             }
-            sendBlock(dataBlocks[index], dataNum, blockNum, blockSize, dataSize, hashCode, index)
+            launch {
+                sendBlock(
+                    dataBlocks[index], dataNum, blockNum, blockSize, dataSize, hashCode, index
+                )
+            }
+
         }
     }
-
 
     private suspend fun sendBlock(
         block: ByteArray,
