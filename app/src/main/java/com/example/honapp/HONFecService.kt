@@ -16,12 +16,12 @@ import kotlin.math.ceil
 import kotlin.math.max
 
 class HONFecService(
-    val tunnel: VpnService,
+    private val tunnel: VpnService,
     private val inputChannel: Channel<IpV4Packet>,
     private val address: InetAddress,
     private val port: Int,
-    private val drop: Int = 10,
-    private val maxSendNum: Int = 10,
+    private val drop: Int = 0,
+    private val timeOut: Long = 100L,
 ) {
     companion object {
         private const val TAG = "HONFecService"
@@ -36,9 +36,9 @@ class HONFecService(
     private val selector = Selector.open()
     var alive = true
 
-    private val maxBlockSize = 1500 - 20 - 8 - 24
-    private val maxK = 8
-    private val maxSendBufSize = maxBlockSize * maxK
+    private val maxBlockSize = 1500 - 20 - 8 - 24 // 1448
+    private val maxK = 32
+    private val maxSendBufSize = maxBlockSize * maxK // 46336
 
     var channel: DatagramChannel? = null
 
@@ -81,10 +81,10 @@ class HONFecService(
     ): Array<ByteArray>
 
     private suspend fun outputLoop() = coroutineScope {
-        val sendBuf = ByteBuffer.allocateDirect(16384)
+        val sendBuf = ByteBuffer.allocateDirect(65536)
         var sendNum = 0
         loop@ while (alive) {
-            val packet = withTimeoutOrNull(1000L) {
+            val packet = withTimeoutOrNull(timeOut / ((sendNum + 1) * (sendNum + 1))) {
                 outputChannel.receive()
             }
             if (packet == null) {
@@ -93,40 +93,39 @@ class HONFecService(
                         TAG,
                         "TIMEOUT: send sendBuf.position=${sendBuf.position()}, sendNum=$sendNum"
                     )
-                    serveOutput(sendBuf)
+
+                    val buf = ByteBuffer.allocateDirect(65536)
+                    sendBuf.flip()
+                    buf.put(sendBuf)
+                    sendBuf.flip()
                     sendBuf.clear()
                     sendNum = 0
+                    launch { serveOutput(buf) }
+
                 }
             } else {
                 if (packet.header!!.totalLength!! <= 0) {
                     continue@loop
                 }
-//            Log.d(TAG, "${packet.header!!.totalLength}: ${packet.rawDataString()}")
-
                 if (sendBuf.position() + packet.rawData!!.size >= maxSendBufSize) {
                     Log.d(
                         TAG,
                         "FULL: send sendBuf.position=${sendBuf.position()}, sendNum=$sendNum"
                     )
-                    serveOutput(sendBuf)
-                    sendBuf.clear()
-                    sendBuf.put(packet.rawData!!)
-                    sendNum = 1
-                } else {
-                    sendBuf.put(packet.rawData!!)
-                    sendNum++
-                    if (sendNum >= maxSendNum) {
-                        Log.d(
-                            TAG,
-                            "MAX: send sendBuf.position=${sendBuf.position()}, sendNum=$sendNum"
-                        )
-                        serveOutput(sendBuf)
-                        sendBuf.clear()
-                        sendNum = 0
-                    }
-                }
-            }
 
+                    val buf = ByteBuffer.allocateDirect(65536)
+                    sendBuf.flip()
+                    buf.put(sendBuf)
+                    sendBuf.flip()
+                    sendBuf.clear()
+                    sendNum = 0
+
+                    launch { serveOutput(buf) }
+
+                }
+                sendBuf.put(packet.rawData!!)
+                sendNum++
+            }
         }
     }
 
@@ -207,6 +206,9 @@ class HONFecService(
 //        )
 
         while (buffer.hasRemaining()) {
+            if (!(channel!!.isOpen)) {
+                break
+            }
             withContext(Dispatchers.IO) {
                 channel!!.write(buffer)
             }
