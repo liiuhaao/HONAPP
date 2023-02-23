@@ -58,6 +58,7 @@ void log_data(unsigned char **data_block, char *tag, int block_num, int block_si
     LOGD("--------%s data_block end------------", tag);
 }
 
+
 JNIEXPORT jobjectArray JNICALL
 Java_com_example_honapp_HONFecService_encode(JNIEnv *env, jobject thiz, jint data_num,
                                              jint block_num,
@@ -96,12 +97,13 @@ Java_com_example_honapp_HONFecService_encode(JNIEnv *env, jobject thiz, jint dat
 
 JNIEXPORT jobjectArray JNICALL
 Java_com_example_honapp_HONFecService_decode(JNIEnv *env, jobject thiz, jint data_num,
-                                             jint block_num,
-                                             jobjectArray encode_data, jint block_size) {
+                                             jint block_num, jobjectArray encode_data,
+                                             jint block_size) {
     jbyte arr[block_num][block_size];
     unsigned char *data_blocks[block_num];
     unsigned char marks[block_num];
-    memset(marks, 1, block_num);
+    memset(arr, 0, sizeof(arr));
+    memset(marks, 0, block_num);
     for (int i = 0; i < block_num; i++) {
         jbyteArray block = (*env)->GetObjectArrayElement(env, encode_data, i);
         if (block) {
@@ -109,17 +111,17 @@ Java_com_example_honapp_HONFecService_decode(JNIEnv *env, jobject thiz, jint dat
             data_blocks[i] = (unsigned char *) arr[i];
         } else {
             data_blocks[i] = (unsigned char *) arr[i];
-            marks[i] = 0;
+            marks[i] = 1;
         }
     }
 
-//    log_data((char **) data_blocks, "Before Decode", block_num, block_size);
+//    log_data((unsigned char **) (char **) data_blocks, "Before Decode", block_num, block_size);
 
     reed_solomon *rs = reed_solomon_new(data_num, block_num - data_num);
     reed_solomon_reconstruct(rs, data_blocks, marks, block_num,
                              block_size);
 
-//    log_data((char **) data_blocks, "After Decode", block_num, block_size);
+//    log_data((unsigned char **) (char **) data_blocks, "After Decode", block_num, block_size);
 
     jclass cls = (*env)->FindClass(env, "[B");
     jobjectArray res_data = (*env)->NewObjectArray(env, data_num, cls, NULL);

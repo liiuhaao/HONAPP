@@ -5,6 +5,7 @@ import android.util.Log
 import com.example.honapp.packet.IpV4Packet
 import kotlinx.coroutines.*
 import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.sync.Mutex
 import java.io.IOException
 import java.net.InetAddress
 import java.net.InetSocketAddress
@@ -22,6 +23,7 @@ class HONFecService(
     private val port: Int,
     private val drop: Int = 0,
     private val timeOut: Long = 100L,
+    private val decodeTimeOut: Long = 10000L,
 ) {
     companion object {
         private const val TAG = "HONFecService"
@@ -36,11 +38,16 @@ class HONFecService(
     private val selector = Selector.open()
     private var alive = true
 
-    private val maxBlockSize = 1500 - 20 - 8 - 24 // 1448
-    private val maxK = 32
-    private val maxSendBufSize = maxBlockSize * maxK // 46336
+    private val maxBlockSize = 1500 - 20 - 8 - 24 // 1,448
+    private val maxDataNum = 64
+    private val maxPacketBuf = maxBlockSize * maxDataNum // 92,672
 
-    private var channel: DatagramChannel? = null
+    private val bufferSize = 131072
+
+    private val cache = mutableMapOf<Int, Channel<ByteBuffer>>()
+    private val mutex = Mutex()
+
+    private var udpChannel: DatagramChannel? = null
 
     @OptIn(DelicateCoroutinesApi::class)
     fun start() {
@@ -48,25 +55,25 @@ class HONFecService(
             if (setUp()) {
                 fecInit()
                 GlobalScope.launch { outputLoop() }
-                GlobalScope.launch { readLoop() }
+                GlobalScope.launch { inputLoop() }
                 Log.i(TAG, "Start service")
             }
         }
     }
 
     private fun setUp(): Boolean {
-        channel = DatagramChannel.open()
-        tunnel.protect(channel!!.socket())
-        channel!!.configureBlocking(false)
+        udpChannel = DatagramChannel.open()
+        tunnel.protect(udpChannel!!.socket())
+        udpChannel!!.configureBlocking(false)
         try {
-            channel!!.connect(InetSocketAddress(address, port))
+            udpChannel!!.connect(InetSocketAddress(address, port))
             Log.d(TAG, "Channel has established.")
         } catch (e: IOException) {
             Log.e(TAG, "Channel error!!!", e)
             return false
         }
         selector.wakeup()
-        channel!!.register(selector, SelectionKey.OP_READ, this)
+        udpChannel!!.register(selector, SelectionKey.OP_READ, this)
         return true
     }
 
@@ -81,55 +88,52 @@ class HONFecService(
     ): Array<ByteArray>
 
     private suspend fun outputLoop() = coroutineScope {
-        val sendBuf = ByteBuffer.allocateDirect(65536)
-        var sendNum = 0
+        val packetBuf = ByteBuffer.allocateDirect(bufferSize)
+        var packetNum = 0
         loop@ while (alive) {
-            val packet = withTimeoutOrNull(timeOut / (sendNum + 1)) {
+            val packet = withTimeoutOrNull(timeOut / (packetNum + 1)) {
                 outputChannel.receive()
             }
             if (packet == null) {
-                if (sendBuf.position() > 0) {
-                    Log.d(
-                        TAG,
-                        "TIMEOUT: send sendBuf.position=${sendBuf.position()}, sendNum=$sendNum"
-                    )
+                if (packetBuf.position() > 0) {
+                    Log.d(TAG, "TIMEOUT: send $packetNum packets")
 
-                    val buf = ByteBuffer.allocateDirect(65536)
-                    sendBuf.flip()
-                    buf.put(sendBuf)
-                    sendBuf.flip()
-                    launch { serveOutput(buf) }
-                    sendBuf.clear()
-                    sendNum = 0
+                    packetBuf.flip()
+                    val outputBuf = ByteBuffer.allocateDirect(bufferSize)
+                    outputBuf.put(packetBuf)
+                    packetBuf.flip()
+
+                    launch { serveOutput(outputBuf) }
+
+                    packetBuf.clear()
+                    packetNum = 0
 
                 }
             } else {
                 if (packet.header!!.totalLength!! <= 0) {
                     continue@loop
                 }
-                if (sendBuf.position() + packet.rawData!!.size >= maxSendBufSize) {
-                    Log.d(
-                        TAG, "FULL: send sendBuf.position=${sendBuf.position()}, sendNum=$sendNum"
-                    )
+                if (packetBuf.position() + packet.rawData!!.size >= maxPacketBuf) {
+                    Log.d(TAG, "FULL: send $packetNum packets")
 
-                    val buf = ByteBuffer.allocateDirect(65536)
-                    sendBuf.flip()
-                    buf.put(sendBuf)
-                    sendBuf.flip()
+                    packetBuf.flip()
+                    val outputBuffer = ByteBuffer.allocateDirect(bufferSize)
+                    outputBuffer.put(packetBuf)
+                    packetBuf.flip()
 
-                    launch { serveOutput(sendBuf) }
+                    launch { serveOutput(outputBuffer) }
 
-                    sendBuf.clear()
-                    sendNum = 0
+                    packetBuf.clear()
+                    packetNum = 0
                 }
-                sendBuf.put(packet.rawData!!)
-                sendNum++
+                packetBuf.put(packet.rawData!!)
+                packetNum++
             }
         }
     }
 
 
-    private suspend fun readLoop() {
+    private suspend fun inputLoop() = coroutineScope {
         loop@ while (alive) {
             val n = withContext(Dispatchers.IO) {
                 selector.selectNow()
@@ -145,15 +149,85 @@ class HONFecService(
                 if (key.isValid && key.isReadable) {
                     it.remove()
                     val channel = key.channel() as DatagramChannel
-                    val buffer = ByteBuffer.allocate(65536)
-
+                    val readBuf = ByteBuffer.allocate(bufferSize)
                     val readBytes = withContext(Dispatchers.IO) {
-                        channel.read(buffer)
+                        channel.read(readBuf)
                     }
                     if (readBytes > 0) {
-                        // TODO: Decode
-                        // TODO: Aggregate
-                        val packet = IpV4Packet(buffer, readBytes)
+                        readBuf.flip()
+                        val inputBuf = ByteBuffer.allocate(readBytes)
+                        inputBuf.put(readBuf)
+                        readBuf.flip()
+                        readBuf.clear()
+                        launch { serveInput(inputBuf) }
+//                        val packet = IpV4Packet(readBuffer, readBytes)
+//                        inputChannel.send(packet)
+                    }
+                }
+            }
+        }
+    }
+
+    private suspend fun serveInput(inputBuf: ByteBuffer) = coroutineScope {
+        inputBuf.flip()
+        val hashCode = inputBuf.int
+        val dataSize = inputBuf.int
+        val blockSize = inputBuf.int
+        val dataNum = inputBuf.int
+        val blockNum = inputBuf.int
+        mutex.lock()
+        val channel = cache.getOrPut(hashCode) {
+            val newChannel = Channel<ByteBuffer>()
+            launch {
+                handleDecode(
+                    hashCode, dataSize, blockSize, dataNum, blockNum, newChannel
+                )
+            }
+            newChannel
+        }
+        mutex.unlock()
+        channel.send(inputBuf)
+    }
+
+    private suspend fun handleDecode(
+        hashCode: Int,
+        dataSize: Int,
+        blockSize: Int,
+        dataNum: Int,
+        blockNum: Int,
+        channel: Channel<ByteBuffer>
+    ) {
+        val dataBlocks = Array<ByteArray?>(blockNum) { null }
+        val marks = Array(blockNum) { 1 }
+        var receiveNum = 0
+        while (true) {
+            val inputBuf = withTimeoutOrNull(decodeTimeOut) {
+                channel.receive()
+            }
+            if (inputBuf == null) {
+                mutex.lock()
+                cache.remove(hashCode)
+                mutex.unlock()
+                break
+            } else {
+                val index = inputBuf.int
+                if (marks[index] == 0) {
+                    continue
+                }
+                receiveNum += 1
+                marks[index] = 0
+                dataBlocks[index] = ByteArray(blockSize)
+                inputBuf.get(dataBlocks[index]!!)
+                if (receiveNum == dataNum) {
+
+                    val decodeBlock = decode(dataNum, blockNum, dataBlocks, blockSize)
+                    val decodeBuf = ByteBuffer.allocate(dataNum * blockSize)
+                    for (block in decodeBlock) {
+                        decodeBuf.put(block)
+                    }
+                    decodeBuf.flip()
+                    while (decodeBuf.position() < dataSize) {
+                        val packet = IpV4Packet(decodeBuf)
                         inputChannel.send(packet)
                     }
                 }
@@ -161,13 +235,13 @@ class HONFecService(
         }
     }
 
-    private suspend fun serveOutput(sendBuf: ByteBuffer) = coroutineScope {
-        val dataSize = sendBuf.position()
+    private suspend fun serveOutput(outputBuffer: ByteBuffer) = coroutineScope {
+        val dataSize = outputBuffer.position()
         val blockSize = if (dataSize > maxBlockSize) maxBlockSize else dataSize
         val dataNum = (dataSize + blockSize - 1) / blockSize
         val blockNum = max(dataNum + 1, ceil(dataNum * 0.2).toInt())
 
-        val dataBlocks = encode(dataNum, blockNum, sendBuf, blockSize)
+        val dataBlocks = encode(dataNum, blockNum, outputBuffer, blockSize)
         launch { sendDataBlocks(dataBlocks, blockNum, dataNum, blockSize, dataSize) }
     }
 
@@ -175,6 +249,11 @@ class HONFecService(
         dataBlocks: Array<ByteArray>, blockNum: Int, dataNum: Int, blockSize: Int, dataSize: Int
     ) = coroutineScope {
         val hashCode = dataBlocks.hashCode()
+
+        Log.d(
+            TAG,
+            "TIMEOUT: hashCode=$hashCode, dataSize=$dataSize, block_num=$blockNum, blockSize=$blockSize, dataNum=$dataNum, blockNum=$blockNum"
+        )
         for (index in 0 until blockNum) {
             if ((1..100).random() <= drop) {
                 continue
@@ -190,43 +269,38 @@ class HONFecService(
 
     private suspend fun sendBlock(
         block: ByteArray,
-        data_num: Int,
-        block_num: Int,
+        dataNum: Int,
+        blockNum: Int,
         blockSize: Int,
         dataSize: Int,
         hashCode: Int,
         index: Int,
     ) {
-        val buffer = ByteBuffer.allocate(65536)
+        val buffer = ByteBuffer.allocate(bufferSize)
 
         buffer.putInt(hashCode)
         buffer.putInt(dataSize)
         buffer.putInt(blockSize)
-        buffer.putInt(data_num)
-        buffer.putInt(block_num)
+        buffer.putInt(dataNum)
+        buffer.putInt(blockNum)
         buffer.putInt(index)
         buffer.put(block)
 
         buffer.flip()
 
-//        Log.d(
-//            TAG,
-//            "hashCode=$hashCode, dataSize=$dataSize, blockSize=$blockSize, data_num=$data_num, block_num=$block_num, index=$index"
-//        )
-
         while (buffer.hasRemaining()) {
-            if (!(channel!!.isOpen)) {
+            if (!(udpChannel!!.isOpen)) {
                 break
             }
             withContext(Dispatchers.IO) {
-                channel!!.write(buffer)
+                udpChannel!!.write(buffer)
             }
         }
     }
 
     fun stop() {
         alive = false
-        channel?.close()
+        udpChannel?.close()
         Log.i(TAG, "Stop service")
     }
 

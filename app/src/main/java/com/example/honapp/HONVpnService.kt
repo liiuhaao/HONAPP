@@ -71,7 +71,7 @@ class HONVpnService(
         vpnOutputStream = FileOutputStream(vpnInterface!!.fileDescriptor)
         launch {
             loop@ while (alive) {
-                val buffer = ByteBuffer.allocate(65536)
+                val buffer = ByteBuffer.allocate(131072)
                 val readBytes = withContext(Dispatchers.IO) {
                     vpnInputStream!!.read(buffer.array())
                 }
