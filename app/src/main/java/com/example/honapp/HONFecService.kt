@@ -13,8 +13,9 @@ import java.nio.ByteBuffer
 import java.nio.channels.DatagramChannel
 import java.nio.channels.SelectionKey
 import java.nio.channels.Selector
-import kotlin.math.ceil
-import kotlin.math.max
+import kotlin.time.Duration
+import kotlin.time.Duration.Companion.milliseconds
+import kotlin.time.Duration.Companion.nanoseconds
 
 class HONFecService(
     private val tunnel: VpnService,
@@ -22,8 +23,8 @@ class HONFecService(
     private val address: InetAddress,
     private val port: Int,
     private val drop: Int = 0,
-    private val timeOut: Long = 100L,
-    private val decodeTimeOut: Long = 10000L,
+    private val encodeTimeout: Duration = 100.nanoseconds,
+    private val decodeTimeout: Duration = 1000.milliseconds,
 ) {
     companion object {
         private const val TAG = "HONFecService"
@@ -44,7 +45,8 @@ class HONFecService(
 
     private val bufferSize = 131072
 
-    private val cache = mutableMapOf<Int, Channel<ByteBuffer>>()
+    private val cache =
+        mutableMapOf<Pair<Int, Pair<Pair<Int, Int>, Pair<Int, Int>>>, Channel<ByteBuffer>>()
     private val mutex = Mutex()
 
     private var udpChannel: DatagramChannel? = null
@@ -91,7 +93,7 @@ class HONFecService(
         val packetBuf = ByteBuffer.allocateDirect(bufferSize)
         var packetNum = 0
         loop@ while (alive) {
-            val packet = withTimeoutOrNull(timeOut / (packetNum + 1)) {
+            val packet = withTimeoutOrNull(encodeTimeout / (packetNum + 1)) {
                 outputChannel.receive()
             }
             if (packet == null) {
@@ -176,7 +178,12 @@ class HONFecService(
         val dataNum = inputBuf.int
         val blockNum = inputBuf.int
         mutex.lock()
-        val channel = cache.getOrPut(hashCode) {
+        val channel = cache.getOrPut(
+            Pair(
+                hashCode,
+                Pair(Pair(dataSize, blockSize), Pair(dataNum, blockNum))
+            )
+        ) {
             val newChannel = Channel<ByteBuffer>()
             launch {
                 handleDecode(
@@ -201,12 +208,17 @@ class HONFecService(
         val marks = Array(blockNum) { 1 }
         var receiveNum = 0
         while (true) {
-            val inputBuf = withTimeoutOrNull(decodeTimeOut) {
+            val inputBuf = withTimeoutOrNull(decodeTimeout) {
                 channel.receive()
             }
             if (inputBuf == null) {
                 mutex.lock()
-                cache.remove(hashCode)
+                cache.remove(
+                    Pair(
+                        hashCode,
+                        Pair(Pair(dataSize, blockSize), Pair(dataNum, blockNum))
+                    )
+                )
                 mutex.unlock()
                 break
             } else {
@@ -219,7 +231,6 @@ class HONFecService(
                 dataBlocks[index] = ByteArray(blockSize)
                 inputBuf.get(dataBlocks[index]!!)
                 if (receiveNum == dataNum) {
-
                     val decodeBlock = decode(dataNum, blockNum, dataBlocks, blockSize)
                     val decodeBuf = ByteBuffer.allocate(dataNum * blockSize)
                     for (block in decodeBlock) {
@@ -239,8 +250,14 @@ class HONFecService(
         val dataSize = outputBuffer.position()
         val blockSize = if (dataSize > maxBlockSize) maxBlockSize else dataSize
         val dataNum = (dataSize + blockSize - 1) / blockSize
-        val blockNum = max(dataNum + 1, ceil(dataNum * 0.2).toInt())
+//        val blockNum = dataNum + floor(dataNum * 0.2).toInt()
 
+        var blockNum = dataNum
+        for (i in 0 until dataNum) {
+            if ((1..100).random() <= 20) {
+                blockNum++;
+            }
+        }
         val dataBlocks = encode(dataNum, blockNum, outputBuffer, blockSize)
         launch { sendDataBlocks(dataBlocks, blockNum, dataNum, blockSize, dataSize) }
     }

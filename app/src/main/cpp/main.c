@@ -78,8 +78,10 @@ Java_com_example_honapp_HONFecService_encode(JNIEnv *env, jobject thiz, jint dat
 
 //    log_data(data_blocks, "origin", block_num, block_size);
 
-    reed_solomon *rs = reed_solomon_new(data_num, block_num - data_num);
-    reed_solomon_encode2(rs, data_blocks, block_num, block_size);
+    if (block_num > data_num) {
+        reed_solomon *rs = reed_solomon_new(data_num, block_num - data_num);
+        reed_solomon_encode2(rs, data_blocks, block_num, block_size);
+    }
 
 //    log_data(data_blocks, "encode", block_num, block_size);
 
@@ -117,9 +119,11 @@ Java_com_example_honapp_HONFecService_decode(JNIEnv *env, jobject thiz, jint dat
 
 //    log_data((unsigned char **) (char **) data_blocks, "Before Decode", block_num, block_size);
 
-    reed_solomon *rs = reed_solomon_new(data_num, block_num - data_num);
-    reed_solomon_reconstruct(rs, data_blocks, marks, block_num,
-                             block_size);
+    if(block_num>data_num){
+        reed_solomon *rs = reed_solomon_new(data_num, block_num - data_num);
+        reed_solomon_reconstruct(rs, data_blocks, marks, block_num,
+                                 block_size);
+    }
 
 //    log_data((unsigned char **) (char **) data_blocks, "After Decode", block_num, block_size);
 
