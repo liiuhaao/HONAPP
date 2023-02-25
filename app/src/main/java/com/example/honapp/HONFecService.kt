@@ -13,6 +13,8 @@ import java.nio.ByteBuffer
 import java.nio.channels.DatagramChannel
 import java.nio.channels.SelectionKey
 import java.nio.channels.Selector
+import kotlin.math.floor
+import kotlin.math.max
 import kotlin.time.Duration
 import kotlin.time.Duration.Companion.milliseconds
 import kotlin.time.Duration.Companion.nanoseconds
@@ -250,8 +252,7 @@ class HONFecService(
         val dataSize = outputBuffer.position()
         val blockSize = if (dataSize > maxBlockSize) maxBlockSize else dataSize
         val dataNum = (dataSize + blockSize - 1) / blockSize
-//        val blockNum = dataNum + floor(dataNum * 0.2).toInt()
-
+//        val blockNum = max(dataNum + 1, dataNum + floor(dataNum * 0.2).toInt())
         var blockNum = dataNum
         for (i in 0 until dataNum) {
             if ((1..100).random() <= 20) {
