@@ -25,7 +25,7 @@ class HONFecService(
     private val address: InetAddress,
     private val port: Int,
     private val drop: Int = 0,
-    private val encodeTimeout: Duration = 100.nanoseconds,
+    private val encodeTimeout: Duration = 1000.nanoseconds,
     private val decodeTimeout: Duration = 1000.milliseconds,
 ) {
     companion object {
@@ -41,7 +41,7 @@ class HONFecService(
     private val selector = Selector.open()
     private var alive = true
 
-    private val maxBlockSize = 1500 - 20 - 8 - 24 // 1,448
+    private val maxBlockSize = 1200 - 20 - 8 - 24 // 1,448
     private val maxDataNum = 64
     private val maxPacketBuf = maxBlockSize * maxDataNum // 92,672
 
@@ -143,7 +143,6 @@ class HONFecService(
                 selector.selectNow()
             }
             if (n <= 0) {
-                delay(100)
                 continue@loop
             }
             val keys = selector.selectedKeys()

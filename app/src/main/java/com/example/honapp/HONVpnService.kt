@@ -8,7 +8,6 @@ import android.util.Log
 import com.example.honapp.packet.IpV4Packet
 import kotlinx.coroutines.*
 import kotlinx.coroutines.channels.Channel
-import kotlinx.coroutines.selects.whileSelect
 import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.net.InetAddress
@@ -25,7 +24,6 @@ class HONVpnService(
     }
 
     private val inetAddress = InetAddress.getByName(address)
-    private val closeCh = Channel<Unit>()
     private val inputCh = Channel<IpV4Packet>()
 
     private var vpnInterface: ParcelFileDescriptor? = null
@@ -59,61 +57,46 @@ class HONVpnService(
         Log.d(TAG, "VPN interface has established!")
     }
 
+    @OptIn(DelicateCoroutinesApi::class)
     private fun startVpn() {
-        GlobalScope.launch { vpnRunLoop() }
+        vpnInputStream = FileInputStream(vpnInterface!!.fileDescriptor)
+        vpnOutputStream = FileOutputStream(vpnInterface!!.fileDescriptor)
+        GlobalScope.launch { outputLoop() }
+        GlobalScope.launch { inputLoop() }
     }
 
-    private suspend fun vpnRunLoop() = coroutineScope {
-        Log.d(TAG, "Running loop...")
-        // Receive from local and send to remote network.
-        vpnInputStream = FileInputStream(vpnInterface!!.fileDescriptor)
-        // Receive from remote and send to local network.
-        vpnOutputStream = FileOutputStream(vpnInterface!!.fileDescriptor)
-        launch {
-            loop@ while (alive) {
-                val buffer = ByteBuffer.allocate(131072)
-                val readBytes = withContext(Dispatchers.IO) {
-                    vpnInputStream!!.read(buffer.array())
-                }
-                if (readBytes <= 0) {
-                    delay(100)
-                    continue@loop
-                }
-                val packet = IpV4Packet(buffer, readBytes)
-                Log.d(TAG, "REQUEST: $packet")
-                honFecService!!.outputChannel.send(packet)
+    private suspend fun outputLoop() {
+        loop@ while (alive) {
+            val buffer = ByteBuffer.allocate(131072)
+            val readBytes = withContext(Dispatchers.IO) {
+                vpnInputStream!!.read(buffer.array())
+            }
+            if (readBytes <= 0) {
+                continue@loop
+            }
+            val packet = IpV4Packet(buffer, readBytes)
+            Log.d(TAG, "REQUEST $readBytes: $packet")
+            honFecService!!.outputChannel.send(packet)
+        }
+    }
+
+    private suspend fun inputLoop() {
+        loop@ while (alive) {
+            val packet = inputCh.receive()
+            Log.d(TAG, "RESPONSE: $packet")
+            withContext(Dispatchers.IO) {
+                vpnOutputStream!!.write(packet.rawData)
             }
         }
-        whileSelect {
-            inputCh.onReceive { packet ->
-                Log.d(TAG, "RESPONSE: $packet")
-                withContext(Dispatchers.IO) {
-                    vpnOutputStream!!.write(packet.rawData)
-                }
-                true
-            }
-            closeCh.onReceiveCatching {
-                false
-            }
-        }
-        vpnExitLoop()
     }
 
     private fun stopVpn() {
         alive = false
-        closeCh.close()
         vpnInterface?.close()
         vpnInputStream!!.close()
         vpnOutputStream!!.close()
         honFecService!!.stop()
         stopSelf()
         Log.i(TAG, "Stopped VPN")
-    }
-
-    private fun vpnExitLoop() {
-        vpnInputStream!!.close()
-        vpnOutputStream!!.close()
-        alive = false
-        Log.i(TAG, "Exit loop")
     }
 }
