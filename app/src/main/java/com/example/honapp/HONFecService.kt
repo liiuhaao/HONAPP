@@ -44,12 +44,15 @@ class HONFecService(
     private val maxPacketBuf = maxBlockSize * maxDataNum // 92,672
 
     private val bufferSize = 131072
-    private val parityRate = 0
     private val maxPacketNum = 5
+
+
+    private var parityRate = 0.0
+    private val parityMutex = Mutex()
 
     private val cache =
         mutableMapOf<Pair<Int, Pair<Pair<Int, Int>, Pair<Int, Int>>>, Channel<ByteBuffer>>()
-    private val mutex = Mutex()
+    private val cacheMutex = Mutex()
 
     private var udpChannel: DatagramChannel? = null
 
@@ -114,15 +117,13 @@ class HONFecService(
                 outputChannel.receive()
             }
             if (packet == null) {
-                if (packetBuf.position() > 0) {
-                    Log.d(TAG, "TIMEOUT: send $packetNum packets")
-
+                if (packetNum > 0) {
                     packetBuf.flip()
                     val outputBuf = ByteBuffer.allocateDirect(bufferSize)
                     outputBuf.put(packetBuf)
                     packetBuf.flip()
 
-                    launch { serveOutput(outputBuf) }
+                    serveOutput(outputBuf, packetNum)
 
                     packetBuf.clear()
                     packetNum = 0
@@ -133,14 +134,12 @@ class HONFecService(
                     continue@loop
                 }
                 if (packetBuf.position() + packet.rawData!!.size >= maxPacketBuf) {
-                    Log.d(TAG, "FULL: send $packetNum packets")
-
                     packetBuf.flip()
                     val outputBuffer = ByteBuffer.allocateDirect(bufferSize)
                     outputBuffer.put(packetBuf)
                     packetBuf.flip()
 
-                    launch { serveOutput(outputBuffer) }
+                    serveOutput(outputBuffer, packetNum)
 
                     packetBuf.clear()
                     packetNum = 0
@@ -148,14 +147,12 @@ class HONFecService(
                 packetBuf.put(packet.rawData!!)
                 packetNum++
                 if (packetNum >= maxPacketNum) {
-                    Log.d(TAG, "TIMEOUT: send $packetNum packets")
-
                     packetBuf.flip()
                     val outputBuf = ByteBuffer.allocateDirect(bufferSize)
                     outputBuf.put(packetBuf)
                     packetBuf.flip()
 
-                    launch { serveOutput(outputBuf) }
+                    serveOutput(outputBuf, packetNum)
 
                     packetBuf.clear()
                     packetNum = 0
@@ -191,8 +188,7 @@ class HONFecService(
                         inputBuf.put(readBuf)
                         inputBuf.flip()
                         readBuf.flip()
-                        readBuf.clear()
-                        launch { serveInput(inputBuf) }
+                        launch { serveInput(readBuf) }
 //                        val packet = IpV4Packet(inputBuf, readBytes)
 //                        inputChannel.send(packet)
                     }
@@ -207,7 +203,7 @@ class HONFecService(
         val blockSize = inputBuf.int
         val dataNum = inputBuf.int
         val blockNum = inputBuf.int
-        mutex.lock()
+        cacheMutex.lock()
         val channel = cache.getOrPut(
             Pair(
                 hashCode,
@@ -222,7 +218,7 @@ class HONFecService(
             }
             newChannel
         }
-        mutex.unlock()
+        cacheMutex.unlock()
         channel.send(inputBuf)
     }
 
@@ -242,14 +238,18 @@ class HONFecService(
                 channel.receive()
             }
             if (inputBuf == null) {
-                mutex.lock()
+                parityMutex.lock()
+                parityRate = parityRate * 0.9 + (receiveNum - blockNum).toDouble() / blockNum
+                parityMutex.unlock()
+
+                cacheMutex.lock()
                 cache.remove(
                     Pair(
                         hashCode,
                         Pair(Pair(dataSize, blockSize), Pair(dataNum, blockNum))
                     )
                 )
-                mutex.unlock()
+                cacheMutex.unlock()
                 break
             } else {
                 val index = inputBuf.int
@@ -276,16 +276,22 @@ class HONFecService(
         }
     }
 
-    private suspend fun serveOutput(outputBuffer: ByteBuffer) = coroutineScope {
-
+    private suspend fun serveOutput(outputBuffer: ByteBuffer, packetNum: Int) = coroutineScope {
 
         val dataSize = outputBuffer.position()
-        val blockSize = if (dataSize > maxBlockSize) maxBlockSize else dataSize
-        val dataNum = (dataSize + blockSize - 1) / blockSize
+        val dataNum = packetNum
+        val blockSize = (dataSize + dataNum - 1) / dataNum
+
+//        val blockSize = if (dataSize > maxBlockSize) maxBlockSize else dataSize
+//        val dataNum = (dataSize + blockSize - 1) / blockSize
 //        val blockNum = max(dataNum + 1, dataNum + floor(dataNum * 0.2).toInt())
+
         var blockNum = dataNum
+        parityMutex.lock()
+        val rate = parityRate
+        parityMutex.unlock()
         for (i in 0 until dataNum) {
-            if ((1..100).random() <= parityRate) {
+            if ((1..100).random() <= rate) {
                 blockNum++
             }
         }
@@ -300,7 +306,7 @@ class HONFecService(
 
         Log.d(
             TAG,
-            "TIMEOUT: hashCode=$hashCode, dataSize=$dataSize, block_num=$blockNum, blockSize=$blockSize, dataNum=$dataNum, blockNum=$blockNum"
+            "TIMEOUT: hashCode=$hashCode, dataSize=$dataSize, block_num=$blockNum, blockSize=$blockSize, dataNum=$dataNum, blockNum=$blockNum, parityRate=$parityRate"
         )
         for (index in 0 until blockNum) {
             if ((1..100).random() <= drop) {

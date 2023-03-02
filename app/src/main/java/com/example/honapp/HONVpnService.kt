@@ -10,6 +10,7 @@ import kotlinx.coroutines.*
 import kotlinx.coroutines.channels.Channel
 import java.io.FileInputStream
 import java.io.FileOutputStream
+import java.io.IOException
 import java.net.InetAddress
 import java.nio.ByteBuffer
 
@@ -68,8 +69,13 @@ class HONVpnService(
     private suspend fun outputLoop() {
         loop@ while (alive) {
             val buffer = ByteBuffer.allocate(131072)
-            val readBytes = withContext(Dispatchers.IO) {
-                vpnInputStream!!.read(buffer.array())
+            var readBytes = 0
+            try {
+                readBytes = withContext(Dispatchers.IO) {
+                    vpnInputStream!!.read(buffer.array())
+                }
+            } catch (e: IOException) {
+                continue@loop
             }
             if (readBytes <= 0) {
                 continue@loop
@@ -87,8 +93,12 @@ class HONVpnService(
         loop@ while (alive) {
             val packet = inputCh.receive()
             Log.d(TAG, "RESPONSE: $packet")
-            withContext(Dispatchers.IO) {
-                vpnOutputStream!!.write(packet.rawData)
+            try {
+                withContext(Dispatchers.IO) {
+                    vpnOutputStream?.write(packet.rawData)
+                }
+            } catch (e: IOException) {
+                e.printStackTrace();
             }
         }
     }
