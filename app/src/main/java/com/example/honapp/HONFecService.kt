@@ -13,8 +13,6 @@ import java.nio.ByteBuffer
 import java.nio.channels.DatagramChannel
 import java.nio.channels.SelectionKey
 import java.nio.channels.Selector
-import kotlin.math.floor
-import kotlin.math.max
 import kotlin.time.Duration
 import kotlin.time.Duration.Companion.milliseconds
 import kotlin.time.Duration.Companion.nanoseconds
@@ -25,7 +23,7 @@ class HONFecService(
     private val address: InetAddress,
     private val port: Int,
     private val drop: Int = 0,
-    private val encodeTimeout: Duration = 1000.nanoseconds,
+    private val encodeTimeout: Duration = 10.nanoseconds,
     private val decodeTimeout: Duration = 1000.milliseconds,
 ) {
     companion object {
@@ -46,6 +44,8 @@ class HONFecService(
     private val maxPacketBuf = maxBlockSize * maxDataNum // 92,672
 
     private val bufferSize = 131072
+    private val parityRate = 0
+    private val maxPacketNum = 5
 
     private val cache =
         mutableMapOf<Pair<Int, Pair<Pair<Int, Int>, Pair<Int, Int>>>, Channel<ByteBuffer>>()
@@ -95,6 +95,21 @@ class HONFecService(
         val packetBuf = ByteBuffer.allocateDirect(bufferSize)
         var packetNum = 0
         loop@ while (alive) {
+
+//            val packet = outputChannel.receive()
+//            val buffer = ByteBuffer.allocate(bufferSize)
+//            buffer.put(packet.rawData)
+//            buffer.flip()
+//            while (buffer.hasRemaining()) {
+//                if (!(udpChannel!!.isOpen)) {
+//                    break
+//                }
+//                withContext(Dispatchers.IO) {
+//                    udpChannel!!.write(buffer)
+//                }
+//            }
+
+
             val packet = withTimeoutOrNull(encodeTimeout / (packetNum + 1)) {
                 outputChannel.receive()
             }
@@ -132,6 +147,20 @@ class HONFecService(
                 }
                 packetBuf.put(packet.rawData!!)
                 packetNum++
+                if (packetNum >= maxPacketNum) {
+                    Log.d(TAG, "TIMEOUT: send $packetNum packets")
+
+                    packetBuf.flip()
+                    val outputBuf = ByteBuffer.allocateDirect(bufferSize)
+                    outputBuf.put(packetBuf)
+                    packetBuf.flip()
+
+                    launch { serveOutput(outputBuf) }
+
+                    packetBuf.clear()
+                    packetNum = 0
+
+                }
             }
         }
     }
@@ -160,10 +189,11 @@ class HONFecService(
                         readBuf.flip()
                         val inputBuf = ByteBuffer.allocate(readBytes)
                         inputBuf.put(readBuf)
+                        inputBuf.flip()
                         readBuf.flip()
                         readBuf.clear()
                         launch { serveInput(inputBuf) }
-//                        val packet = IpV4Packet(readBuffer, readBytes)
+//                        val packet = IpV4Packet(inputBuf, readBytes)
 //                        inputChannel.send(packet)
                     }
                 }
@@ -172,7 +202,6 @@ class HONFecService(
     }
 
     private suspend fun serveInput(inputBuf: ByteBuffer) = coroutineScope {
-        inputBuf.flip()
         val hashCode = inputBuf.int
         val dataSize = inputBuf.int
         val blockSize = inputBuf.int
@@ -209,7 +238,7 @@ class HONFecService(
         val marks = Array(blockNum) { 1 }
         var receiveNum = 0
         while (true) {
-            val inputBuf = withTimeoutOrNull(decodeTimeout) {
+            val inputBuf = withTimeoutOrNull(decodeTimeout / (receiveNum + 1)) {
                 channel.receive()
             }
             if (inputBuf == null) {
@@ -248,14 +277,16 @@ class HONFecService(
     }
 
     private suspend fun serveOutput(outputBuffer: ByteBuffer) = coroutineScope {
+
+
         val dataSize = outputBuffer.position()
         val blockSize = if (dataSize > maxBlockSize) maxBlockSize else dataSize
         val dataNum = (dataSize + blockSize - 1) / blockSize
 //        val blockNum = max(dataNum + 1, dataNum + floor(dataNum * 0.2).toInt())
         var blockNum = dataNum
         for (i in 0 until dataNum) {
-            if ((1..100).random() <= 20) {
-                blockNum++;
+            if ((1..100).random() <= parityRate) {
+                blockNum++
             }
         }
         val dataBlocks = encode(dataNum, blockNum, outputBuffer, blockSize)

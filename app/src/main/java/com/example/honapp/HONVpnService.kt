@@ -15,7 +15,7 @@ import java.nio.ByteBuffer
 
 class HONVpnService(
 //    address: String = "202.120.87.33",
-    address: String = "106.75.241.159",
+    address: String = "106.75.227.236",
     private val port: Int = 54345,
     private val drop: Int = 0,
 ) : VpnService() {
@@ -75,6 +75,9 @@ class HONVpnService(
                 continue@loop
             }
             val packet = IpV4Packet(buffer, readBytes)
+            if (packet.header!!.totalLength!! <= 0) {
+                continue@loop
+            }
             Log.d(TAG, "REQUEST $readBytes: $packet")
             honFecService!!.outputChannel.send(packet)
         }
