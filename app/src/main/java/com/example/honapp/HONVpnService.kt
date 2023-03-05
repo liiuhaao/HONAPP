@@ -46,7 +46,7 @@ class HONVpnService(
     override fun onCreate() {
         super.onCreate()
         setupVpn()
-        honFecService = HONFecService(this, inputCh, inetAddress, port, dropRate)
+        honFecService = HONFecService(this, inputCh, inetAddress, port, dropRate, parityRate)
         honFecService!!.start()
         startVpn()
     }
