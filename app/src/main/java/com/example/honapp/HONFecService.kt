@@ -22,8 +22,9 @@ class HONFecService(
     private val inputChannel: Channel<IpV4Packet>,
     private val address: InetAddress,
     private val port: Int,
-    private val drop: Int = 0,
-    private val encodeTimeout: Duration = 10.nanoseconds,
+    private val dropRate: Int = 0,
+    private val parityRate: Int = 0,
+    private val encodeTimeout: Duration = 1000.nanoseconds,
     private val decodeTimeout: Duration = 1000.milliseconds,
 ) {
     companion object {
@@ -44,11 +45,7 @@ class HONFecService(
     private val maxPacketBuf = maxBlockSize * maxDataNum // 92,672
 
     private val bufferSize = 131072
-    private val maxPacketNum = 5
-
-
-    private var parityRate = 0.0
-    private val parityMutex = Mutex()
+    private val maxPacketNum = 10
 
     private val cache =
         mutableMapOf<Pair<Int, Pair<Pair<Int, Int>, Pair<Int, Int>>>, Channel<ByteBuffer>>()
@@ -111,7 +108,6 @@ class HONFecService(
 //                    udpChannel!!.write(buffer)
 //                }
 //            }
-
 
             val packet = withTimeoutOrNull(encodeTimeout / (packetNum + 1)) {
                 outputChannel.receive()
@@ -219,7 +215,9 @@ class HONFecService(
             newChannel
         }
         cacheMutex.unlock()
-        channel.send(inputBuf)
+        if ((1..100).random() > dropRate) {
+            channel.send(inputBuf)
+        }
     }
 
     private suspend fun handleDecode(
@@ -238,9 +236,6 @@ class HONFecService(
                 channel.receive()
             }
             if (inputBuf == null) {
-                parityMutex.lock()
-                parityRate = parityRate * 0.9 + (receiveNum - blockNum).toDouble() / blockNum
-                parityMutex.unlock()
 
                 cacheMutex.lock()
                 cache.remove(
@@ -287,11 +282,8 @@ class HONFecService(
 //        val blockNum = max(dataNum + 1, dataNum + floor(dataNum * 0.2).toInt())
 
         var blockNum = dataNum
-        parityMutex.lock()
-        val rate = parityRate
-        parityMutex.unlock()
         for (i in 0 until dataNum) {
-            if ((1..100).random() <= rate) {
+            if ((1..100).random() <= parityRate) {
                 blockNum++
             }
         }
@@ -306,10 +298,10 @@ class HONFecService(
 
         Log.d(
             TAG,
-            "TIMEOUT: hashCode=$hashCode, dataSize=$dataSize, block_num=$blockNum, blockSize=$blockSize, dataNum=$dataNum, blockNum=$blockNum, parityRate=$parityRate"
+            "TIMEOUT: hashCode=$hashCode, dataSize=$dataSize, block_num=$blockNum, blockSize=$blockSize, dataNum=$dataNum, blockNum=$blockNum, rate=${parityRate * 100}"
         )
         for (index in 0 until blockNum) {
-            if ((1..100).random() <= drop) {
+            if ((1..100).random() <= dropRate) {
                 continue
             }
             launch {

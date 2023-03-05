@@ -18,7 +18,8 @@ class HONVpnService(
 //    address: String = "202.120.87.33",
     address: String = "106.75.227.236",
     private val port: Int = 54345,
-    private val drop: Int = 0,
+    private val dropRate: Int = 0,
+    private val parityRate: Int = 0,
 ) : VpnService() {
     companion object {
         private const val TAG = "HONVpnService"
@@ -45,7 +46,7 @@ class HONVpnService(
     override fun onCreate() {
         super.onCreate()
         setupVpn()
-        honFecService = HONFecService(this, inputCh, inetAddress, port, drop)
+        honFecService = HONFecService(this, inputCh, inetAddress, port, dropRate)
         honFecService!!.start()
         startVpn()
     }
