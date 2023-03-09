@@ -20,12 +20,6 @@ import kotlin.time.Duration.Companion.nanoseconds
 class HONFecService(
     private val tunnel: VpnService,
     private val inputChannel: Channel<IpV4Packet>,
-    private val address: InetAddress,
-    private val port: Int,
-    private val dropRate: Int = 0,
-    private val parityRate: Int = 0,
-    private val encodeTimeout: Duration = 1000.nanoseconds,
-    private val decodeTimeout: Duration = 1000.milliseconds,
 ) {
     companion object {
         private const val TAG = "HONFecService"
@@ -37,8 +31,16 @@ class HONFecService(
 
     val outputChannel = Channel<IpV4Packet>()
 
-    private val selector = Selector.open()
+    private var dropRate: Int = 0
+    private var parityRate: Int = 0
+
+    private val encodeTimeout: Duration = 1000.nanoseconds
+    private val decodeTimeout: Duration = 1000.milliseconds
+
     private var alive = true
+
+    private var udpChannel: DatagramChannel? = null
+    private val selector = Selector.open()
 
     private val maxBlockSize = 1200 - 20 - 8 - 24 // 1,448
     private val maxDataNum = 64
@@ -51,13 +53,13 @@ class HONFecService(
         mutableMapOf<Pair<Int, Pair<Pair<Int, Int>, Pair<Int, Int>>>, Channel<ByteBuffer>>()
     private val cacheMutex = Mutex()
 
-    private var udpChannel: DatagramChannel? = null
 
     @OptIn(DelicateCoroutinesApi::class)
-    fun start() {
+    fun start(inetAddress: InetAddress, port: Int) {
         GlobalScope.launch {
-            if (setUp()) {
+            if (setupFec(inetAddress, port)) {
                 fecInit()
+                alive = true
                 GlobalScope.launch { outputLoop() }
                 GlobalScope.launch { inputLoop() }
                 Log.i(TAG, "Start service")
@@ -65,12 +67,13 @@ class HONFecService(
         }
     }
 
-    private fun setUp(): Boolean {
+    private fun setupFec(inetAddress: InetAddress, port: Int): Boolean {
         udpChannel = DatagramChannel.open()
         tunnel.protect(udpChannel!!.socket())
         udpChannel!!.configureBlocking(false)
         try {
-            udpChannel!!.connect(InetSocketAddress(address, port))
+            Log.d(TAG, "$inetAddress, $port")
+            udpChannel!!.connect(InetSocketAddress(inetAddress, port))
             Log.d(TAG, "Channel has established.")
         } catch (e: IOException) {
             Log.e(TAG, "Channel error!!!", e)
@@ -79,6 +82,14 @@ class HONFecService(
         selector.wakeup()
         udpChannel!!.register(selector, SelectionKey.OP_READ, this)
         return true
+    }
+
+    fun setDropRate(value: Int) {
+        dropRate = value
+    }
+
+    fun setParityRate(value: Int) {
+        parityRate = value
     }
 
     private external fun fecInit()
@@ -95,7 +106,6 @@ class HONFecService(
         val packetBuf = ByteBuffer.allocateDirect(bufferSize)
         var packetNum = 0
         loop@ while (alive) {
-
 //            val packet = outputChannel.receive()
 //            val buffer = ByteBuffer.allocate(bufferSize)
 //            buffer.put(packet.rawData)
@@ -129,6 +139,8 @@ class HONFecService(
                 if (packet.header!!.totalLength!! <= 0) {
                     continue@loop
                 }
+
+                Log.d(TAG, packet.toString())
                 if (packetBuf.position() + packet.rawData!!.size >= maxPacketBuf) {
                     packetBuf.flip()
                     val outputBuffer = ByteBuffer.allocateDirect(bufferSize)
@@ -176,7 +188,14 @@ class HONFecService(
                     val channel = key.channel() as DatagramChannel
                     val readBuf = ByteBuffer.allocate(bufferSize)
                     val readBytes = withContext(Dispatchers.IO) {
-                        channel.read(readBuf)
+                        try {
+                            withContext(Dispatchers.IO) {
+                                channel.read(readBuf)
+                            }
+                        } catch (e: IOException) {
+                            e.printStackTrace();
+                            -1
+                        }
                     }
                     if (readBytes > 0) {
                         readBuf.flip()
@@ -274,11 +293,12 @@ class HONFecService(
     private suspend fun serveOutput(outputBuffer: ByteBuffer, packetNum: Int) = coroutineScope {
 
         val dataSize = outputBuffer.position()
-        val dataNum = packetNum
-        val blockSize = (dataSize + dataNum - 1) / dataNum
 
-//        val blockSize = if (dataSize > maxBlockSize) maxBlockSize else dataSize
-//        val dataNum = (dataSize + blockSize - 1) / blockSize
+//        val dataNum = packetNum
+//        val blockSize = (dataSize + dataNum - 1) / dataNum
+
+        val blockSize = if (dataSize > maxBlockSize) maxBlockSize else dataSize
+        val dataNum = (dataSize + blockSize - 1) / blockSize
 //        val blockNum = max(dataNum + 1, dataNum + floor(dataNum * 0.2).toInt())
 
         var blockNum = dataNum
@@ -298,7 +318,7 @@ class HONFecService(
 
         Log.d(
             TAG,
-            "TIMEOUT: hashCode=$hashCode, dataSize=$dataSize, block_num=$blockNum, blockSize=$blockSize, dataNum=$dataNum, blockNum=$blockNum, rate=${parityRate * 100}"
+            "TIMEOUT: hashCode=$hashCode, dataSize=$dataSize, block_num=$blockNum, blockSize=$blockSize, dataNum=$dataNum, blockNum=$blockNum, rate=${parityRate}"
         )
         for (index in 0 until blockNum) {
             if ((1..100).random() <= dropRate) {
@@ -309,7 +329,6 @@ class HONFecService(
                     dataBlocks[index], dataNum, blockNum, blockSize, dataSize, hashCode, index
                 )
             }
-
         }
     }
 
@@ -338,8 +357,12 @@ class HONFecService(
             if (!(udpChannel!!.isOpen)) {
                 break
             }
-            withContext(Dispatchers.IO) {
-                udpChannel!!.write(buffer)
+            try {
+                withContext(Dispatchers.IO) {
+                    udpChannel!!.write(buffer)
+                }
+            } catch (e: IOException) {
+                e.printStackTrace();
             }
         }
     }
@@ -347,6 +370,9 @@ class HONFecService(
     fun stop() {
         alive = false
         udpChannel?.close()
+        selector.keys().forEach {
+            it.cancel()
+        }
         Log.i(TAG, "Stop service")
     }
 

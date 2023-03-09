@@ -14,18 +14,11 @@ import java.io.IOException
 import java.net.InetAddress
 import java.nio.ByteBuffer
 
-class HONVpnService(
-//    address: String = "202.120.87.33",
-    address: String = "106.75.227.236",
-    private val port: Int = 54345,
-    private val dropRate: Int = 0,
-    private val parityRate: Int = 0,
-) : VpnService() {
+class HONVpnService() : VpnService() {
     companion object {
         private const val TAG = "HONVpnService"
     }
 
-    private val inetAddress = InetAddress.getByName(address)
     private val inputCh = Channel<IpV4Packet>()
 
     private var vpnInterface: ParcelFileDescriptor? = null
@@ -36,18 +29,35 @@ class HONVpnService(
 
     private var honFecService: HONFecService? = null
 
+    private var dropRate: Int = 0
+    private var parityRate: Int = 0
+
+
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent?.getStringExtra("COMMAND") == "STOP") {
             stopVpn()
         }
+        if (intent != null) {
+            dropRate = intent.getIntExtra("DROP_RATE", 0)
+            parityRate = intent.getIntExtra("PARITY_RATE", 0)
+
+            honFecService?.setDropRate(dropRate)
+            honFecService?.setParityRate(parityRate)
+
+            val ipAddress = intent.getStringExtra("IP_ADDRESS")
+            val port = intent.getIntExtra("PARITY_RATE", 54345)
+            val inetAddress = InetAddress.getByName(ipAddress)
+            honFecService!!.stop()
+            honFecService!!.start(inetAddress, port)
+        }
         return Service.START_STICKY
     }
+
 
     override fun onCreate() {
         super.onCreate()
         setupVpn()
-        honFecService = HONFecService(this, inputCh, inetAddress, port, dropRate, parityRate)
-        honFecService!!.start()
+        honFecService = HONFecService(this, inputCh)
         startVpn()
     }
 
