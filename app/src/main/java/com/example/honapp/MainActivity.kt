@@ -18,15 +18,14 @@ import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import com.example.honapp.ui.theme.HONAPPTheme
+import kotlinx.coroutines.*
 
-class MainActivity : ComponentActivity() {
+class MainActivity : ComponentActivity() , CoroutineScope by MainScope() {
 
     companion object {
         private const val TAG = "MainActivity"
         private const val VPN_REQUEST_CODE = 0
     }
-
-    private var show = ""
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContent {
@@ -34,6 +33,7 @@ class MainActivity : ComponentActivity() {
                 SetContentView()
             }
         }
+
     }
 
     @Composable
@@ -118,20 +118,23 @@ class MainActivity : ComponentActivity() {
         if (intent != null) {
             startActivityForResult(intent, VPN_REQUEST_CODE)
         } else {
-            onActivityResult(VPN_REQUEST_CODE, RESULT_OK, null);
-            val vpnIntent = Intent(this, HONVpnService::class.java)
-            vpnIntent.putExtra("DROP_RATE", dropRate.toInt())
-            vpnIntent.putExtra("PARITY_RATE", parityRate.toInt())
-            vpnIntent.putExtra("IP_ADDRESS", ipAddress)
-            vpnIntent.putExtra("PARITY_RATE", port.toInt())
-            startService(vpnIntent)
+            launch {
+                val vpnIntent = Intent(this@MainActivity, HONVpnService::class.java)
+                vpnIntent.putExtra("DROP_RATE", dropRate.toInt())
+                vpnIntent.putExtra("PARITY_RATE", parityRate.toInt())
+                vpnIntent.putExtra("IP_ADDRESS", ipAddress)
+                vpnIntent.putExtra("PORT", port.toInt())
+                startService(vpnIntent)
+            }
         }
     }
 
     private fun stopVpn() {
-        val intent = Intent(this, HONVpnService::class.java)
-        intent.putExtra("COMMAND", "STOP")
-        startService(intent)
+        launch {
+            val intent = Intent(this@MainActivity, HONVpnService::class.java)
+            intent.action = HONVpnService.ACTION_STOP_VPN
+            startService(intent)
+        }
     }
 }
 

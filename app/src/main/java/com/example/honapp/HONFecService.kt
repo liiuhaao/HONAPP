@@ -20,7 +20,8 @@ import kotlin.time.Duration.Companion.nanoseconds
 class HONFecService(
     private val tunnel: VpnService,
     private val inputChannel: Channel<IpV4Packet>,
-) {
+) : CoroutineScope by CoroutineScope(Dispatchers.Main) {
+
     companion object {
         private const val TAG = "HONFecService"
 
@@ -53,34 +54,49 @@ class HONFecService(
         mutableMapOf<Pair<Int, Pair<Pair<Int, Int>, Pair<Int, Int>>>, Channel<ByteBuffer>>()
     private val cacheMutex = Mutex()
 
-
-    @OptIn(DelicateCoroutinesApi::class)
     fun start(inetAddress: InetAddress, port: Int) {
-        GlobalScope.launch {
+        launch {
             if (setupFec(inetAddress, port)) {
                 fecInit()
                 alive = true
-                GlobalScope.launch { outputLoop() }
-                GlobalScope.launch { inputLoop() }
+                launch { outputLoop() }
+                launch { inputLoop() }
                 Log.i(TAG, "Start service")
             }
         }
     }
 
-    private fun setupFec(inetAddress: InetAddress, port: Int): Boolean {
-        udpChannel = DatagramChannel.open()
+    fun stop() {
+        alive = false
+        udpChannel?.close()
+        selector.keys().forEach {
+            it.cancel()
+        }
+        Log.i(TAG, "Stop service")
+    }
+
+    private suspend fun setupFec(inetAddress: InetAddress, port: Int): Boolean {
+        udpChannel = withContext(Dispatchers.IO) {
+            DatagramChannel.open()
+        }
         tunnel.protect(udpChannel!!.socket())
-        udpChannel!!.configureBlocking(false)
+        withContext(Dispatchers.IO) {
+            udpChannel!!.configureBlocking(false)
+        }
         try {
-            Log.d(TAG, "$inetAddress, $port")
-            udpChannel!!.connect(InetSocketAddress(inetAddress, port))
+            Log.d(TAG, "Set up $inetAddress, $port")
+            withContext(Dispatchers.IO) {
+                udpChannel!!.connect(InetSocketAddress(inetAddress, port))
+            }
             Log.d(TAG, "Channel has established.")
         } catch (e: IOException) {
             Log.e(TAG, "Channel error!!!", e)
             return false
         }
         selector.wakeup()
-        udpChannel!!.register(selector, SelectionKey.OP_READ, this)
+        withContext(Dispatchers.IO) {
+            udpChannel!!.register(selector, SelectionKey.OP_READ, this)
+        }
         return true
     }
 
@@ -367,13 +383,5 @@ class HONFecService(
         }
     }
 
-    fun stop() {
-        alive = false
-        udpChannel?.close()
-        selector.keys().forEach {
-            it.cancel()
-        }
-        Log.i(TAG, "Stop service")
-    }
 
 }

@@ -34,6 +34,7 @@
             android:permission="android.permission.BIND_VPN_SERVICE">
             <intent-filter>
                 <action android:name="android.net.VpnService" />
+                <action android:name="com.example.honapp.STOP_VPN" />
             </intent-filter>
         </service>
 

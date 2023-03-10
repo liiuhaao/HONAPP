@@ -1,6 +1,5 @@
 package com.example.honapp
 
-import android.app.Service
 import android.content.Intent
 import android.net.VpnService
 import android.os.ParcelFileDescriptor
@@ -14,9 +13,10 @@ import java.io.IOException
 import java.net.InetAddress
 import java.nio.ByteBuffer
 
-class HONVpnService() : VpnService() {
+class HONVpnService() : VpnService(), CoroutineScope by CoroutineScope(Dispatchers.Main)  {
     companion object {
         private const val TAG = "HONVpnService"
+        const val ACTION_STOP_VPN = "com.example.honapp.STOP_VPN"
     }
 
     private val inputCh = Channel<IpV4Packet>()
@@ -32,11 +32,22 @@ class HONVpnService() : VpnService() {
     private var dropRate: Int = 0
     private var parityRate: Int = 0
 
+    override fun onCreate() {
+        super.onCreate()
+        setupVpn()
+        honFecService = HONFecService(this, inputCh)
+        startVpn()
+    }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        if (intent?.getStringExtra("COMMAND") == "STOP") {
-            stopVpn()
+        when (intent?.action) {
+            ACTION_STOP_VPN -> stopVpn()
+            else -> startVpn(intent)
         }
+        return START_NOT_STICKY
+    }
+
+    private fun startVpn(intent: Intent?) {
         if (intent != null) {
             dropRate = intent.getIntExtra("DROP_RATE", 0)
             parityRate = intent.getIntExtra("PARITY_RATE", 0)
@@ -45,21 +56,29 @@ class HONVpnService() : VpnService() {
             honFecService?.setParityRate(parityRate)
 
             val ipAddress = intent.getStringExtra("IP_ADDRESS")
-            val port = intent.getIntExtra("PARITY_RATE", 54345)
+            val port = intent.getIntExtra("PORT", 54345)
             val inetAddress = InetAddress.getByName(ipAddress)
             honFecService!!.stop()
             honFecService!!.start(inetAddress, port)
         }
-        return Service.START_STICKY
+    }
+
+    private fun stopVpn() {
+        try {
+            alive = false
+            vpnInterface?.close()
+            vpnInputStream!!.close()
+            vpnOutputStream!!.close()
+            honFecService!!.stop()
+            stopSelf()
+            Log.i(TAG, "Stopped VPN servuce")
+        } catch (e: IOException) {
+            Log.e(TAG, "Failed to stop VPN service", e)
+        }
     }
 
 
-    override fun onCreate() {
-        super.onCreate()
-        setupVpn()
-        honFecService = HONFecService(this, inputCh)
-        startVpn()
-    }
+
 
     private fun setupVpn() {
         val builder =
@@ -69,12 +88,11 @@ class HONVpnService() : VpnService() {
         Log.d(TAG, "VPN interface has established!")
     }
 
-    @OptIn(DelicateCoroutinesApi::class)
     private fun startVpn() {
         vpnInputStream = FileInputStream(vpnInterface!!.fileDescriptor)
         vpnOutputStream = FileOutputStream(vpnInterface!!.fileDescriptor)
-        GlobalScope.launch { outputLoop() }
-        GlobalScope.launch { inputLoop() }
+        launch { outputLoop() }
+        launch { inputLoop() }
     }
 
     private suspend fun outputLoop() {
@@ -114,13 +132,4 @@ class HONVpnService() : VpnService() {
         }
     }
 
-    private fun stopVpn() {
-        alive = false
-        vpnInterface?.close()
-        vpnInputStream!!.close()
-        vpnOutputStream!!.close()
-        honFecService!!.stop()
-        stopSelf()
-        Log.i(TAG, "Stopped VPN")
-    }
 }
