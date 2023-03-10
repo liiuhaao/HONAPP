@@ -7,10 +7,9 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.text.KeyboardOptions
-import androidx.compose.material.Button
-import androidx.compose.material.OutlinedTextField
-import androidx.compose.material.Slider
-import androidx.compose.material.Text
+import androidx.compose.material.*
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.ArrowDropDown
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -33,7 +32,6 @@ class MainActivity : ComponentActivity() , CoroutineScope by MainScope() {
                 SetContentView()
             }
         }
-
     }
 
     @Composable
@@ -43,41 +41,60 @@ class MainActivity : ComponentActivity() , CoroutineScope by MainScope() {
         var ipAddress by remember { mutableStateOf("106.75.227.236") }
         var port by remember { mutableStateOf("54345") }
 
+        val ipAddresses = listOf("106.75.227.236", "106.75.231.195")
+        var menuExpanded by remember { mutableStateOf(false) }
+
+
         Column(modifier = Modifier.padding(20.dp)) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically,
-                content = {
-                    OutlinedTextField(
-                        value = ipAddress,
-                        onValueChange = { newValue ->
-                            ipAddress = newValue
-                        },
-                        label = { Text("IP地址") },
-                        modifier = Modifier.weight(2f),
-                        keyboardOptions = KeyboardOptions(
-                            keyboardType = KeyboardType.Number,
-                            imeAction = ImeAction.Next
-                        ),
-                        singleLine = true
-                    )
-                    Spacer(modifier = Modifier.width(10.dp))
-                    OutlinedTextField(
-                        value = port,
-                        onValueChange = { newValue ->
-                            port = newValue
-                        },
-                        label = { Text("端口号") },
-                        modifier = Modifier.weight(1f),
-                        keyboardOptions = KeyboardOptions(
-                            keyboardType = KeyboardType.Number,
-                            imeAction = ImeAction.Done
-                        ),
-                        singleLine = true
-                    )
+            Row(Modifier.fillMaxWidth()) {
+                OutlinedTextField(
+                    value = ipAddress,
+                    onValueChange = { newValue ->
+                        ipAddress = newValue
+                    },
+                    label = { Text("IP地址") },
+                    modifier = Modifier.weight(2f),
+                    keyboardOptions = KeyboardOptions(
+                        keyboardType = KeyboardType.Number,
+                        imeAction = ImeAction.Next
+                    ),
+                    singleLine = true,
+                    trailingIcon = {
+                        IconButton(onClick = { menuExpanded = true }) {
+                            Icon(Icons.Filled.ArrowDropDown, "")
+                        }
+                    }
+                )
+
+                DropdownMenu(
+                    expanded = menuExpanded,
+                    onDismissRequest = { menuExpanded = false },
+                    modifier = Modifier.weight(2f),
+                ) {
+                    ipAddresses.forEach { address ->
+                        DropdownMenuItem(onClick = {
+                            ipAddress = address
+                            menuExpanded = false
+                        }) {
+                            Text(address)
+                        }
+                    }
                 }
-            )
+                Spacer(modifier = Modifier.width(10.dp))
+                OutlinedTextField(
+                    value = port,
+                    onValueChange = { newValue ->
+                        port = newValue
+                    },
+                    label = { Text("端口号") },
+                    modifier = Modifier.weight(1f),
+                    keyboardOptions = KeyboardOptions(
+                        keyboardType = KeyboardType.Number,
+                        imeAction = ImeAction.Done
+                    ),
+                    singleLine = true
+                )
+            }
 
             Spacer(modifier = Modifier.height(10.dp))
             Text(text = "模拟丢包率：${dropRate.toInt()}%")
