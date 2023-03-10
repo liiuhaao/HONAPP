@@ -13,7 +13,7 @@ import java.io.IOException
 import java.net.InetAddress
 import java.nio.ByteBuffer
 
-class HONVpnService() : VpnService(), CoroutineScope by CoroutineScope(Dispatchers.Main)  {
+class HONVpnService() : VpnService(), CoroutineScope by CoroutineScope(Dispatchers.Default)  {
     companion object {
         private const val TAG = "HONVpnService"
         const val ACTION_STOP_VPN = "com.example.honapp.STOP_VPN"
@@ -76,9 +76,6 @@ class HONVpnService() : VpnService(), CoroutineScope by CoroutineScope(Dispatche
             Log.e(TAG, "Failed to stop VPN service", e)
         }
     }
-
-
-
 
     private fun setupVpn() {
         val builder =

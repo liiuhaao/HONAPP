@@ -20,7 +20,7 @@ import kotlin.time.Duration.Companion.nanoseconds
 class HONFecService(
     private val tunnel: VpnService,
     private val inputChannel: Channel<IpV4Packet>,
-) : CoroutineScope by CoroutineScope(Dispatchers.Main) {
+) : CoroutineScope by CoroutineScope(Dispatchers.Default) {
 
     companion object {
         private const val TAG = "HONFecService"

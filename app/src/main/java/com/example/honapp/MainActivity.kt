@@ -11,20 +11,22 @@ import androidx.compose.material.*
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowDropDown
 import androidx.compose.runtime.*
-import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import com.example.honapp.ui.theme.HONAPPTheme
-import kotlinx.coroutines.*
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.MainScope
+import kotlinx.coroutines.launch
 
-class MainActivity : ComponentActivity() , CoroutineScope by MainScope() {
+class MainActivity : ComponentActivity(), CoroutineScope by MainScope() {
 
     companion object {
         private const val TAG = "MainActivity"
         private const val VPN_REQUEST_CODE = 0
     }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContent {
@@ -38,10 +40,10 @@ class MainActivity : ComponentActivity() , CoroutineScope by MainScope() {
     fun SetContentView() {
         var dropRate by remember { mutableStateOf(0f) }
         var parityRate by remember { mutableStateOf(0f) }
-        var ipAddress by remember { mutableStateOf("106.75.227.236") }
+        var ipAddress by remember { mutableStateOf("106.75.231.195") }
         var port by remember { mutableStateOf("54345") }
 
-        val ipAddresses = listOf("106.75.227.236", "106.75.231.195")
+        val ipAddresses = listOf("106.75.231.195", "106.75.227.236")
         var menuExpanded by remember { mutableStateOf(false) }
 
 
