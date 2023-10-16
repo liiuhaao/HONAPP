@@ -9,7 +9,6 @@ import kotlinx.coroutines.*
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.sync.Mutex
 import java.io.IOException
-import java.lang.Thread.sleep
 import java.net.InetAddress
 import java.net.InetSocketAddress
 import java.net.PortUnreachableException
@@ -18,11 +17,8 @@ import java.nio.channels.DatagramChannel
 import java.nio.channels.SelectionKey
 import java.nio.channels.Selector
 import java.util.*
-import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.time.Duration.Companion.microseconds
-import kotlin.time.Duration.Companion.milliseconds
-import kotlin.time.Duration.Companion.seconds
 
 class HONFecService(
     private val tunnel: VpnService,
@@ -46,10 +42,11 @@ class HONFecService(
     private var txID: UInt = 0u
     private val txMutex = Mutex()
 
-    private var rxID: UInt = 0u
+    private var rxGroupId: UInt = 0u
+    private var rxIndex: Int = 0
     private var rxNum: Int = 0
     private val rxMutex = Mutex()
-    private var rxList: LinkedList<Triple<IpV4Packet, UInt, Long>> = LinkedList()
+    private var rxList: LinkedList<Triple<IpV4Packet, Pair<UInt, Int>, Long>> = LinkedList()
 
     private var alive = true
 
@@ -71,8 +68,7 @@ class HONFecService(
 
     private val bufferSize = 131072
 
-    private val cache =
-        mutableMapOf<Pair<UInt, Pair<Pair<UInt, UInt>, Pair<UInt, UInt>>>, Channel<ByteBuffer>>()
+    private val cache = mutableMapOf<UInt, Channel<Pair<String, ByteBuffer>>>()
     private val cacheMutex = Mutex()
 
     val isWifiAvailable = AtomicBoolean(false)
@@ -124,11 +120,9 @@ class HONFecService(
         }
         tunnel.protect(cellularUdpChannel!!.socket())
 
-        val requestWifi = NetworkRequest.Builder()
-            .addTransportType(NetworkCapabilities.TRANSPORT_WIFI)
-            .build()
-        connectivityManager.requestNetwork(
-            requestWifi,
+        val requestWifi =
+            NetworkRequest.Builder().addTransportType(NetworkCapabilities.TRANSPORT_WIFI).build()
+        connectivityManager.requestNetwork(requestWifi,
             object : ConnectivityManager.NetworkCallback() {
                 @RequiresApi(Build.VERSION_CODES.M)
                 override fun onAvailable(network: Network) {
@@ -143,11 +137,10 @@ class HONFecService(
                 }
             })
 
-        val requestCellular = NetworkRequest.Builder()
-            .addTransportType(NetworkCapabilities.TRANSPORT_CELLULAR)
-            .build()
-        connectivityManager.requestNetwork(
-            requestCellular,
+        val requestCellular =
+            NetworkRequest.Builder().addTransportType(NetworkCapabilities.TRANSPORT_CELLULAR)
+                .build()
+        connectivityManager.requestNetwork(requestCellular,
             object : ConnectivityManager.NetworkCallback() {
                 @RequiresApi(Build.VERSION_CODES.M)
                 override fun onAvailable(network: Network) {
@@ -187,77 +180,78 @@ class HONFecService(
     private external fun fecInit()
 
     private external fun encode(
-        dataNum: Int, blockNum: Int, sendBuffer: ByteBuffer, blockSize: Int
+        dataNum: Int, blockNum: Int, packetBuffers: Array<ByteArray>, blockSize: Int
     ): Array<ByteArray>
 
     private external fun decode(
         dataNum: Int, blockNum: Int, encodeData: Array<ByteArray?>, blockSize: Int
     ): Array<ByteArray>
 
-
     private suspend fun outputLoop() = coroutineScope {
-        val outputBuffer = ByteBuffer.allocateDirect(bufferSize)
-        var packetNum = 0
-        var startTime: Long? = null
+        val blockNum = config!!.dataNum + config!!.parityNum
+        var packetBuffers: Array<ByteArray> = Array(config!!.dataNum) { ByteArray(0) }
+        var index = -1
         val outputMutex = Mutex()
+        var groupId = 0u
 
-        suspend fun sendBufferedData() {
-            if (packetNum > 0) {
-                Log.d(TAG, "send packet $packetNum")
-                serveOutput(outputBuffer, packetNum)
-                outputBuffer.clear()
-                packetNum = 0
-            }
-//            if(packetNum>0){
-//                outputBuffer.flip()
-//                if(defaultUdpChannel?.isConnected==true){
-//                    defaultUdpChannel?.write(outputBuffer)
-//                }
-//                outputBuffer.flip()
-//                outputBuffer.clear()
-//                packetNum = 0
-//            }
-        }
-        launch {
-            while (true) {
-                delay(config!!.encodeTimeout.microseconds / 10)
-                if (startTime != null) {
-                    outputMutex.lock()
-                    if (packetNum > 0) {
-                        val timedelta = System.nanoTime() - startTime!!
-                        if (timedelta > config!!.encodeTimeout * 1000) {
-                            Log.d(TAG, "timeout=$timedelta, ${config!!.encodeTimeout * 1000}")
-                            sendBufferedData()
-                            startTime = null
-                        } else {
-                            Log.d(TAG, "timedelta=$timedelta")
-                        }
-                    }
-                    outputMutex.unlock()
-                }
-            }
-        }
         loop@ while (true) {
             val packet = outputChannel.receive()
             outputMutex.lock()
-            if (startTime == null) {
-                startTime = System.nanoTime()
+            index += 1
+
+            packetBuffers[index] = packet.rawData!!
+
+            if (index == 0) {
+                groupId = getGroupId()
             }
 
-            if (outputBuffer.position() + packet.rawData!!.size >= maxPacketBuf) {
-                sendBufferedData()
-                startTime = System.nanoTime()
+            val dataChannel = if (isCellularAvailable.get()) {
+                cellularUdpChannel
+            } else {
+                wifiUdpChannel
             }
 
-            outputBuffer.put(packet.rawData!!)
-            packetNum++
+            outputSend(
+                groupId,
+                index,
+                packet.rawData!!,
+                dataChannel
+            )
 
-            if (packetNum >= config!!.maxTXNum) {
-                sendBufferedData()
-                startTime = null
+            if (index + 1 == config!!.dataNum) {
+                if (config!!.parityNum > 0) {
+                    val blockSize = packetBuffers.maxOf { it.size }
+                    for (i in packetBuffers.indices) {
+                        val currentSize = packetBuffers[i].size
+                        if (currentSize < blockSize) {
+                            val paddedBuffer = ByteArray(blockSize)
+                            System.arraycopy(packetBuffers[i], 0, paddedBuffer, 0, currentSize)
+                            packetBuffers[i] = paddedBuffer
+                        }
+                    }
+
+                    val encodedData = encode(config!!.dataNum, blockNum, packetBuffers, blockSize)
+
+                    val parityChannel = if (isWifiAvailable.get()) {
+                        wifiUdpChannel
+                    } else {
+                        cellularUdpChannel
+                    }
+
+                    for (parityIndex in 0 until config!!.parityNum) {
+                        outputSend(
+                            groupId,
+                            config!!.dataNum + parityIndex,
+                            encodedData[parityIndex],
+                            parityChannel
+                        )
+                    }
+                }
+                packetBuffers = Array(blockNum) { ByteArray(0) }
+                index = -1
             }
+
             outputMutex.unlock()
-
         }
     }
 
@@ -304,169 +298,46 @@ class HONFecService(
         }
     }
 
-    private suspend fun serveOutput(outputBuffer: ByteBuffer, packetNum: Int) {
 
-
-        val dataSize = outputBuffer.position()
-
-        val dataNum = 10
-        val blockSize = (dataSize + dataNum - 1) / dataNum
-
-//        val blockSize = if (dataSize > maxBlockSize) maxBlockSize else dataSize
-//        val dataNum = (dataSize + blockSize - 1) / blockSize
-//        val blockNum = max(dataNum + 1, dataNum + floor(dataNum * 0.2).toInt())
-
-        var blockNum = dataNum
-        for (i in 0 until dataNum) {
-            if ((1..100).random() <= config!!.parityRate) {
-                blockNum++
-            }
-        }
-        val dataBlocks = encode(dataNum, blockNum, outputBuffer, blockSize)
-
-//        outputBuffer.flip()
-//        if (cellularUdpChannel?.isConnected == true) {
-//            cellularUdpChannel?.write(outputBuffer)
-//        }
-//        outputBuffer.flip()
-        launch { sendDataBlocks(dataBlocks, blockNum, dataNum, blockSize, dataSize, outputBuffer) }
-    }
-
-    private suspend fun sendDataBlocks(
-        dataBlocks: Array<ByteArray>,
-        blockNum: Int,
-        dataNum: Int,
-        blockSize: Int,
-        dataSize: Int,
-        outputBuffer: ByteBuffer
-    ) {
+    private suspend fun getGroupId(): UInt {
         txMutex.lock()
         val groupId = txID
         txID += 1u
         txMutex.unlock()
-
-//
-
-        for (index in 0 until blockNum) {
-            if ((1..100).random() <= config!!.dropRate) {
-                continue
-            }
-//            launch {
-            var udpChannel: DatagramChannel? = null
-//            var udpChannel
-            val randomValue = (1..100).random()
-
-            if (index < dataNum) {
-                udpChannel = if (isCellularAvailable.get()) {
-                    Log.d(
-                        TAG,
-                        "cellularUdpChannel!!!!!!  wifiDelay=$wifiDelay   cellularDelay=$cellularDelay   [$index/$dataNum/$blockNum]"
-                    )
-                    cellularUdpChannel
-                } else {
-                    wifiUdpChannel
-                }
-            } else {
-                udpChannel = if (isWifiAvailable.get()) {
-                    Log.d(
-                        TAG,
-                        "wifiUdpChannel!!!!!!  wifiDelay=$wifiDelay   cellularDelay=$cellularDelay   [$index/$dataNum/$blockNum]"
-                    )
-                    wifiUdpChannel
-                } else {
-                    cellularUdpChannel
-                }
-            }
-
-//            if (wifiDelay < cellularDelay) {
-//                if (isWifiAvailable.get() && randomValue <= config!!.primaryProbability) {
-//                    Log.d(
-//                        TAG,
-//                        "wifiUdpChannel!!!!!!  wifiDelay=$wifiDelay   cellularDelay=$cellularDelay"
-//                    )
-//                    udpChannel = wifiUdpChannel
-//                } else if (isCellularAvailable.get()) {
-//                    Log.d(
-//                        TAG,
-//                        "cellularUdpChannel!!!!!!  wifiDelay=$wifiDelay   cellularDelay=$cellularDelay"
-//                    )
-//                    udpChannel = cellularUdpChannel
-//                } else {
-//                    Log.d(
-//                        TAG,
-//                        "wifiUdpChannel!!!!!!  wifiDelay=$wifiDelay   cellularDelay=$cellularDelay"
-//                    )
-//                    udpChannel = wifiUdpChannel
-//                }
-//            } else {
-//                if (isCellularAvailable.get() && randomValue <= config!!.primaryProbability) {
-//                    Log.d(
-//                        TAG,
-//                        "cellularUdpChannel!!!!!!  wifiDelay=$wifiDelay   cellularDelay=$cellularDelay"
-//                    )
-//                    udpChannel = cellularUdpChannel
-//                } else if (isWifiAvailable.get()) {
-//                    Log.d(
-//                        TAG,
-//                        "wifiUdpChannel!!!!!!  wifiDelay=$wifiDelay   cellularDelay=$cellularDelay"
-//                    )
-//                    udpChannel = wifiUdpChannel
-//                } else {
-//                    Log.d(
-//                        TAG,
-//                        "cellularUdpChannel!!!!!!  wifiDelay=$wifiDelay   cellularDelay=$cellularDelay"
-//                    )
-//                    udpChannel = cellularUdpChannel
-//                }
-//            }
-
-            if (udpChannel != null) {
-                sendBlock(
-                    dataBlocks[index],
-                    dataNum,
-                    blockNum,
-                    blockSize,
-                    dataSize,
-                    groupId,
-                    index,
-                    udpChannel,
-                    1,
-                )
-            }
-
-        }
+        return groupId
     }
 
-    private suspend fun sendBlock(
-        block: ByteArray,
-        dataNum: Int,
-        blockNum: Int,
-        blockSize: Int,
-        dataSize: Int,
+
+    private suspend fun outputSend(
         groupID: UInt,
         index: Int,
-        udpChannel: DatagramChannel,
-        sendTime: Int,
+        block: ByteArray,
+        udpChannel: DatagramChannel?,
     ) {
+        if (udpChannel == null) {
+            return
+        }
+        if ((1..100).random() <= config!!.dropRate) {
+            Log.d(TAG, "outputSend dropout")
+            return
+        }
+
         val buffer = ByteBuffer.allocate(bufferSize)
 
         val packetSendTime = System.currentTimeMillis()
         buffer.putInt(groupID.toInt())
-        buffer.putInt(dataSize)
-        buffer.putInt(blockSize)
-        buffer.putInt(dataNum)
-        buffer.putInt(blockNum)
         buffer.putInt(index)
-        buffer.putInt(sendTime)
-        if (sendTime > 0) {
-            buffer.putLong(packetSendTime)
-        }
+        buffer.putLong(packetSendTime)
         buffer.put(block)
 
         buffer.flip()
         if (udpChannel.isConnected) {
             withContext(Dispatchers.IO) {
                 try {
+//                    Log.d(
+//                        TAG,
+//                        "sendBlock: groupId=$groupID, index=$index, block=$block"
+//                    )
                     udpChannel.write(buffer)
                 } catch (e: PortUnreachableException) {
                     Log.e("Error", "PortUnreachableException")
@@ -475,6 +346,7 @@ class HONFecService(
                 }
             }
         }
+
         buffer.flip()
 
 
@@ -482,147 +354,193 @@ class HONFecService(
 
     private suspend fun serveInput(inputBuf: ByteBuffer, channelType: String) = coroutineScope {
         val groupId = inputBuf.int.toUInt()
-        val dataSize = inputBuf.int.toUInt()
-        val blockSize = inputBuf.int.toUInt()
-        val dataNum = inputBuf.int.toUInt()
-        val blockNum = inputBuf.int.toUInt()
-        val sendTime = inputBuf.int.toUInt()
-        if (sendTime > 0u) {
-            val packetSendTime = inputBuf.long
-            val packetReceiveTime = System.currentTimeMillis()
-            if (channelType == "wifi") {
-                wifiDelay = packetReceiveTime - packetSendTime
-            } else {
-                cellularDelay = packetReceiveTime - packetSendTime
-            }
-        }
         cacheMutex.lock()
         val channel = cache.getOrPut(
-            Pair(
-                groupId,
-                Pair(Pair(dataSize, blockSize), Pair(dataNum, blockNum))
-            )
+            groupId
         ) {
-            val newChannel = Channel<ByteBuffer>()
+            val newChannel = Channel<Pair<String, ByteBuffer>>()
             launch {
                 handleDecode(
-                    groupId, dataSize, blockSize, dataNum, blockNum, newChannel
+                    groupId, newChannel
                 )
             }
             newChannel
         }
+        channel.send(Pair(channelType, inputBuf))
         cacheMutex.unlock()
-        if ((1..100).random() > config!!.dropRate) {
-            channel.send(inputBuf)
-        }
+
     }
 
     private suspend fun handleDecode(
         groupId: UInt,
-        dataSize: UInt,
-        blockSize: UInt,
-        dataNum: UInt,
-        blockNum: UInt,
-        channel: Channel<ByteBuffer>
+        channel: Channel<Pair<String, ByteBuffer>>
     ) {
-        val dataBlocks = Array<ByteArray?>(blockNum.toInt()) { null }
-        val marks = Array(blockNum.toInt()) { 1 }
+        val blockNum = config!!.dataNum + config!!.parityNum
+        val dataBlocks = Array<ByteArray?>(blockNum) { null }
+
+//        var packetBuffers: Array<ByteArray> = Array(config!!.dataNum) { ByteArray(0) }
+        val marks = Array(blockNum) { 1 }
         var receiveNum = 0
         while (true) {
-            val inputBuf =
-                withTimeoutOrNull(config!!.decodeTimeout.microseconds) {
-                    channel.receive()
-                }
-            if (inputBuf == null) {
+            val inputPair = withTimeoutOrNull(config!!.decodeTimeout.microseconds) {
+                channel.receive()
+            }
+            if (inputPair == null) {
                 cacheMutex.lock()
-                cache.remove(
-                    Pair(
-                        groupId,
-                        Pair(Pair(dataSize, blockSize), Pair(dataNum, blockNum))
-                    )
-                )
+                cache.remove(groupId)
                 cacheMutex.unlock()
                 break
             } else {
+                val channelType = inputPair.first
+                val inputBuf = inputPair.second
+
                 val index = inputBuf.int
+                val packetSendTime = inputBuf.long
+
+                if (index >= config!!.dataNum + config!!.parityNum) {
+                    continue
+                }
+                val randomNum = (1..100).random()
+                if (randomNum <= (config!!.dropRate)) {
+                    Log.d(TAG, "handleDecode: groupId=$groupId, index=$index dropout $randomNum")
+                    continue
+                }
+//                if(index<2){
+//                    continue
+//                }
+
+                val packetReceiveTime = System.currentTimeMillis()
+                if (channelType == "wifi") {
+                    wifiDelay = packetReceiveTime - packetSendTime
+                } else {
+                    cellularDelay = packetReceiveTime - packetSendTime
+                }
+
+
                 if (marks[index] == 0) {
                     continue
                 }
 
                 receiveNum += 1
                 marks[index] = 0
-                dataBlocks[index] = ByteArray(blockSize.toInt())
-                inputBuf.get(dataBlocks[index]!!)
-                if (receiveNum.toUInt() == dataNum) {
-                    val decodeBlock =
-                        decode(dataNum.toInt(), blockNum.toInt(), dataBlocks, blockSize.toInt())
-                    val decodeBuf = ByteBuffer.allocate((dataNum * blockSize).toInt())
-                    for (block in decodeBlock) {
-                        decodeBuf.put(block)
-                    }
-                    decodeBuf.flip()
 
+                Log.d(
+                    TAG,
+                    "handleDecode: groupId=$groupId, index=$index, receiveNum=$receiveNum, packetSendTime=$packetSendTime"
+                )
+
+
+                if (index < config!!.dataNum) {
+                    val duplicateBuf = inputBuf.duplicate()
+                    val packet = IpV4Packet(duplicateBuf)
+//                    Log.d(TAG, "groupId=$groupId, index=$index, packet=$packet")
                     rxMutex.lock()
-                    while (decodeBuf.position() < dataSize.toInt()) {
-                        val packet = IpV4Packet(decodeBuf)
-                        rxInsert(packet, groupId)
-                    }
+                    rxInsert(packet, groupId, index)
                     rxSend()
                     rxMutex.unlock()
-
-
                 }
+
+
+                dataBlocks[index] = ByteArray(inputBuf.remaining())
+                inputBuf.get(dataBlocks[index]!!)
+
+                if (receiveNum == config!!.dataNum) {
+                    val blockSize = dataBlocks.filterNotNull().maxOf { it.size }
+                    for (i in dataBlocks.indices) {
+                        if (dataBlocks[i] != null && dataBlocks[i]!!.size < blockSize) {
+                            val newArray = ByteArray(blockSize)
+                            System.arraycopy(
+                                dataBlocks[i]!!,
+                                0,
+                                newArray,
+                                0,
+                                dataBlocks[i]!!.size
+                            )
+                            dataBlocks[i] = newArray
+                        }
+                    }
+
+                    val decodeBlocks =
+                        decode(config!!.dataNum, blockNum, dataBlocks, blockSize)
+
+                    rxMutex.lock()
+                    for (i in 0 until config!!.dataNum) {
+                        if (marks[i] == 1) {
+                            val blockBuf = ByteBuffer.allocate(blockSize)
+                            blockBuf.put(decodeBlocks[i])
+                            blockBuf.flip()
+                            val packet = IpV4Packet(blockBuf)
+                            Log.d(TAG, "decode groupId=$groupId, index=$i, packet=$packet")
+                            marks[i] = 0
+                            rxInsert(packet, groupId, i)
+                            rxSend()
+                        }
+                    }
+                    rxMutex.unlock()
+                }
+
             }
         }
     }
 
-    private suspend fun rxSend(timeout: Boolean = false) = coroutineScope {
-//        if (rxList.isNotEmpty()) {
-//            var rxLog = ""
-//            rxLog += "Left $rxNum in rxList: rxId=$rxID. leftId={"
-//            var leftID = rxID
-//            var leftNum = 0
-//            for (rx_iter in rxList) {
-//                if (rx_iter.second != leftID) {
-//                    if (leftID != rxID) {
-//                        rxLog += "$leftID*$leftNum,"
-//                    }
-//                    leftID = rx_iter.second
-//                    leftNum = 1
-//                } else {
-//                    leftNum += 1
-//                }
-//            }
-//            rxLog += "$leftID*$leftNum}"
-//            Log.d(TAG, rxLog)
-//        }
+    private suspend fun rxInsert(packet: IpV4Packet, groupID: UInt, index: Int) = coroutineScope {
+        val rxNew: Triple<IpV4Packet, Pair<UInt, Int>, Long> =
+            Triple(packet, Pair(groupID, index), System.nanoTime())
 
-        while ((rxList.isNotEmpty()) || (rxNum > config!!.maxRXNum)) {
-            val now = System.nanoTime()
-            val isTimeout = (now - rxList.first.third > config!!.rxTimeout * 1000)
-            val rx = rxList.first()
-            if (!isTimeout && rxNum < config!!.maxRXNum && rxID != rx.second && rxID < rx.second - 1u) {
-                break
-            }
-            inputChannel.send(rx.first)
-            rxID = rx.second
-            rxList.removeFirst()
-            rxNum--
+//        Log.d(TAG, " rxInsert: rxGroupId=$rxGroupId, rxIndex=$rxIndex, groupId=$groupID, index=$index, rxNew time=${rxNew.third}")
+        if (rxGroupId > groupID || (rxGroupId == groupID && rxIndex > index)) {
+            return@coroutineScope
         }
-    }
 
-    private suspend fun rxInsert(packet: IpV4Packet, groupID: UInt) = coroutineScope {
-        val rx: Triple<IpV4Packet, UInt, Long> = Triple(packet, groupID, System.nanoTime())
 
         val rxIter = rxList.listIterator()
         while (rxIter.hasNext()) {
-            if (rxIter.next().second > rx.second) {
+            val rx = rxIter.next()
+            val rxPair = rx.second
+            if (rxPair.first > groupID || (rxPair.first == groupID && rxPair.second > index)) {
                 rxIter.previous()
                 break
             }
         }
         rxNum += 1
-        rxIter.add(rx)
+        rxIter.add(rxNew)
+        rxPrint()
+    }
+
+    private suspend fun rxSend() = coroutineScope {
+        while ((rxList.isNotEmpty())) {
+            val now = System.nanoTime()
+            val isTimeout = (now - rxList.first.third > config!!.rxTimeout * 1000)
+            val rx = rxList.first()
+            val rxPair = rx.second
+            if (rxNum < config!!.rxNum && !isTimeout) {
+                if (rxGroupId < rxPair.first || (rxGroupId == rxPair.first && rxIndex < rxPair.second)) {
+                    break
+                }
+            }
+            inputChannel.send(rx.first)
+            if (rxPair.second == config!!.dataNum - 1) {
+                rxGroupId = rxPair.first + 1u
+                rxIndex = 0
+            } else {
+                rxGroupId = rxPair.first
+                rxIndex = rxPair.second + 1
+            }
+            rxList.removeFirst()
+            rxNum--
+        }
+    }
+
+    private suspend fun rxPrint() = coroutineScope {
+        if (rxList.isNotEmpty()) {
+            var rxLog = ""
+            rxLog += "Left $rxNum in rxList: rxGroupId=$rxGroupId, rxIndex=$rxIndex. leftId={"
+            for (rxIter in rxList) {
+                rxLog += "${rxIter.second},"
+            }
+            rxLog += "}"
+            Log.d(TAG, rxLog)
+        }
     }
 
     private suspend fun monitorRxTimeout() = coroutineScope {
@@ -631,6 +549,10 @@ class HONFecService(
             rxMutex.lock()
             val now = System.nanoTime()
             if (rxList.isNotEmpty() && now - rxList.first.third > config!!.rxTimeout * 1000) {
+                Log.d(
+                    TAG,
+                    "delta = ${now - rxList.first.third}, thread = ${config!!.rxTimeout * 1000}"
+                )
                 rxSend()
             }
             rxMutex.unlock()

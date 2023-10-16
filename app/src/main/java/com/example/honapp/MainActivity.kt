@@ -1,5 +1,6 @@
 package com.example.honapp
 
+import android.annotation.SuppressLint
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ApplicationInfo
@@ -25,6 +26,8 @@ import androidx.compose.material.*
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowDropDown
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Home
+import androidx.compose.material.icons.filled.Send
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -35,8 +38,15 @@ import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
+import androidx.navigation.NavController
+import androidx.navigation.compose.NavHost
+import androidx.navigation.compose.composable
+import androidx.navigation.compose.currentBackStackEntryAsState
+import androidx.navigation.compose.rememberNavController
 import com.example.honapp.ui.theme.HONAPPTheme
 import kotlinx.coroutines.*
+import java.io.DataInputStream
+import java.io.DataOutputStream
 import java.net.Socket
 
 class MainActivity : ComponentActivity(), CoroutineScope by MainScope() {
@@ -50,6 +60,8 @@ class MainActivity : ComponentActivity(), CoroutineScope by MainScope() {
     @RequiresApi(Build.VERSION_CODES.O)
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+
+
         setContent {
             HONAPPTheme {
                 SetContentView()
@@ -58,8 +70,13 @@ class MainActivity : ComponentActivity(), CoroutineScope by MainScope() {
     }
 
     @RequiresApi(Build.VERSION_CODES.O)
+    @SuppressLint("UnusedMaterialScaffoldPaddingParameter")
     @Composable
     fun SetContentView() {
+
+        val navController = rememberNavController()
+        val items = listOf("VPN", "测试")
+
 
         var selectedApp by remember { mutableStateOf<AppInfo?>(null) }
 
@@ -70,12 +87,12 @@ class MainActivity : ComponentActivity(), CoroutineScope by MainScope() {
             mutableStateOf(
                 HONConfig(
                     dropRate = 0,
-                    parityRate = 0,
-                    maxRXNum = 100,
-                    maxTXNum = 10,
-                    encodeTimeout = 1000,
+                    dataNum = 10,
+                    parityNum = 5,
+                    rxNum = 100,
+                    encodeTimeout = 1000000,
                     decodeTimeout = 1000000,
-                    rxTimeout = 1000,
+                    rxTimeout = 100000,
                     primaryProbability = 80,
                     ipAddress = "106.75.241.183",
                     port = "54345"
@@ -86,293 +103,471 @@ class MainActivity : ComponentActivity(), CoroutineScope by MainScope() {
         val ipAddresses = listOf("106.75.241.183", "106.75.227.236")
         var menuExpanded by remember { mutableStateOf(false) }
 
-        val syncLoading = remember { mutableStateOf(false) }
         val syncResult = remember { mutableStateOf("") }
 
-        var primaryProbability = config.primaryProbability.toFloat()
-        var dropRate = config.dropRate.toFloat()
-        var parityRate = config.parityRate.toFloat()
+        var serverAddress by remember { mutableStateOf("106.75.227.194") }
+        var serverPort by remember { mutableStateOf("33333") }
+        var packetSize by remember { mutableStateOf(1024) }
+        var numTests by remember { mutableStateOf(100) }
+        var numThreads by remember { mutableStateOf(1) }
 
-        if (syncLoading.value) {
-            AlertDialog(
-                onDismissRequest = {},
-                title = {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Text("同步中......")
-                        CircularProgressIndicator(modifier = Modifier.size(24.dp))
+        var showResult by remember { mutableStateOf(false) }
+        var averageLatency by remember { mutableStateOf(0L) }
+        var latencyList by remember { mutableStateOf<List<Long>?>(null) }
+        var testJob: Job? = null
+
+
+        Scaffold(bottomBar = {
+            BottomNavigation {
+                val navBackStackEntry by navController.currentBackStackEntryAsState()
+                val currentDestination = navBackStackEntry?.destination?.route
+
+                items.forEach { item ->
+                    BottomNavigationItem(icon = {
+                        when (item) {
+                            "VPN" -> Icon(
+                                Icons.Default.Home, contentDescription = null
+                            )
+
+                            "测试" -> Icon(
+                                Icons.Default.Send, contentDescription = null
+                            )
+
+                            else -> Unit // 可以添加更多的图标
+                        }
+                    },
+                        label = { Text(item) },
+                        selected = currentDestination == item,
+                        onClick = {
+                            navController.navigate(item) {
+                                popUpTo(navController.graph.startDestinationId) {
+                                    saveState = true
+                                }
+                                launchSingleTop = true
+                                restoreState = true
+                            }
+                        })
+                }
+            }
+        }) {
+            NavHost(navController = navController, startDestination = "VPN") {
+                composable("VPN") {
+                    if (syncResult.value.isNotEmpty()) {
+                        AlertDialog(
+                            onDismissRequest = {},
+                            title = {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Text("同步中......")
+                                    CircularProgressIndicator(modifier = Modifier.size(24.dp))
+                                }
+                            },
+                            text = {
+                                Column {
+                                    Text(" ${config.toJson()}")
+                                }
+                            },
+                            buttons = {},
+                        )
                     }
-                },
-                text = {
-                    Column {
-                        Text(" ${config.toJson()}")
+
+                    Column(modifier = Modifier.padding(20.dp)) {
+                        Row(Modifier.fillMaxWidth()) {
+                            OutlinedTextField(value = config.ipAddress!!,
+                                onValueChange = { newValue ->
+                                    config = config.copy(ipAddress = newValue)
+                                },
+                                label = { Text("IP地址") },
+                                modifier = Modifier.weight(2f),
+                                keyboardOptions = KeyboardOptions(
+                                    keyboardType = KeyboardType.Number, imeAction = ImeAction.Next
+                                ),
+                                singleLine = true,
+                                trailingIcon = {
+                                    IconButton(onClick = { menuExpanded = true }) {
+                                        Icon(Icons.Filled.ArrowDropDown, "")
+                                    }
+                                })
+
+                            DropdownMenu(
+                                expanded = menuExpanded,
+                                onDismissRequest = { menuExpanded = false },
+                                modifier = Modifier.weight(2f),
+                            ) {
+                                ipAddresses.forEach { address ->
+                                    DropdownMenuItem(onClick = {
+                                        config = config.copy(ipAddress = address)
+                                        menuExpanded = false
+                                    }) {
+                                        Text(address)
+                                    }
+                                }
+                            }
+                            Spacer(modifier = Modifier.width(10.dp))
+                            OutlinedTextField(
+                                value = config.port!!,
+                                onValueChange = { newValue ->
+                                    config = config.copy(port = newValue)
+                                },
+                                label = { Text("端口号") },
+                                modifier = Modifier.weight(1f),
+                                keyboardOptions = KeyboardOptions(
+                                    keyboardType = KeyboardType.Number, imeAction = ImeAction.Done
+                                ),
+                                singleLine = true
+                            )
+                        }
+
+                        Row {
+                            OutlinedTextField(
+                                value = config.dataNum.toString(),
+                                onValueChange = { newValue ->
+                                    val value = newValue.toIntOrNull()
+                                    config = if (value != null) {
+                                        config.copy(dataNum = value)
+                                    } else {
+                                        config.copy(dataNum = 0)
+                                    }
+                                },
+                                label = { Text("dataNum") },
+                                modifier = Modifier.weight(1f),
+                                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                                singleLine = true,
+                            )
+                            Spacer(modifier = Modifier.width(10.dp))
+                            OutlinedTextField(
+                                value = config.parityNum.toString(),
+                                onValueChange = { newValue ->
+                                    val value = newValue.toIntOrNull()
+                                    config = if (value != null) {
+                                        config.copy(parityNum = value)
+                                    } else {
+                                        config.copy(parityNum = 0)
+                                    }
+                                },
+                                label = { Text("parityNum") },
+                                modifier = Modifier.weight(1f),
+                                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                                singleLine = true,
+                            )
+                            Spacer(modifier = Modifier.width(10.dp))
+                            OutlinedTextField(
+                                value = config.rxNum.toString(),
+                                onValueChange = { newValue ->
+                                    val value = newValue.toIntOrNull()
+                                    config = if (value != null) {
+                                        config.copy(rxNum = value)
+                                    } else {
+                                        config.copy(rxNum = 0)
+                                    }
+                                },
+                                label = { Text("rxNum") },
+                                modifier = Modifier.weight(1f),
+                                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                                singleLine = true,
+                            )
+
+                        }
+                        Spacer(modifier = Modifier.height(10.dp))
+                        Row {
+                            OutlinedTextField(
+                                value = config.encodeTimeout.toString(),
+                                onValueChange = { newValue ->
+                                    val value = newValue.toLongOrNull()
+                                    config = if (value != null) {
+                                        config.copy(encodeTimeout = value)
+                                    } else {
+                                        config.copy(encodeTimeout = 0)
+                                    }
+                                },
+                                label = { Text("编码超时 (微秒)") },
+                                modifier = Modifier.weight(1f),
+                                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                                singleLine = true,
+                            )
+                            Spacer(modifier = Modifier.width(10.dp))
+                            OutlinedTextField(
+                                value = config.decodeTimeout.toString(),
+                                onValueChange = { newValue ->
+                                    val value = newValue.toLongOrNull()
+                                    config = if (value != null) {
+                                        config.copy(decodeTimeout = value)
+                                    } else {
+                                        config.copy(decodeTimeout = 0)
+                                    }
+                                },
+                                label = { Text("解码超时 (微秒)") },
+                                modifier = Modifier.weight(1f),
+                                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                                singleLine = true,
+                            )
+                            Spacer(modifier = Modifier.width(10.dp))
+                            OutlinedTextField(
+                                value = config.rxTimeout.toString(),
+                                onValueChange = { newValue ->
+                                    val value = newValue.toLongOrNull()
+                                    config = if (value != null) {
+                                        config.copy(rxTimeout = value)
+                                    } else {
+                                        config.copy(rxTimeout = 0)
+                                    }
+                                },
+                                label = { Text("保序超时 (微秒)") },
+                                modifier = Modifier.weight(1f),
+                                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                                singleLine = true,
+                            )
+                        }
+                        Row {
+                            OutlinedTextField(
+                                value = config.primaryProbability.toString(),
+                                onValueChange = { newValue ->
+                                    val value = newValue.toIntOrNull()
+                                    config = if (value != null) {
+                                        config.copy(primaryProbability = value)
+                                    } else {
+                                        config.copy(primaryProbability = 0)
+                                    }
+                                },
+                                label = { Text("保守发包率") },
+                                modifier = Modifier.weight(1f),
+                                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                                singleLine = true,
+                            )
+                            Spacer(modifier = Modifier.width(10.dp))
+                            OutlinedTextField(
+                                value = config.dropRate.toString(),
+                                onValueChange = { newValue ->
+                                    val value = newValue.toIntOrNull()
+                                    config = if (value != null) {
+                                        config.copy(dropRate = value)
+                                    } else {
+                                        config.copy(dropRate = 0)
+                                    }
+                                },
+                                label = { Text("模拟丢包率") },
+                                modifier = Modifier.weight(1f),
+                                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                                singleLine = true,
+                            )
+                        }
+
+                        Spacer(modifier = Modifier.height(20.dp))
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth(),
+                            horizontalArrangement = Arrangement.Center,
+                        ) {
+                            Button(onClick = {
+                                startVpn(config, selectedApp?.packageName)
+                            }) {
+                                Text(text = "开始")
+                            }
+                            Spacer(modifier = Modifier.width(20.dp))
+                            Button(onClick = {
+                                launch {
+                                    syncResult.value = "Loading"
+                                    syncResult.value = syncConfig(config)
+                                    syncResult.value = ""
+                                }
+                            }) {
+                                Text(text = "同步")
+                            }
+                            Spacer(modifier = Modifier.width(20.dp))
+                            Button(onClick = ::stopVpn) {
+                                Text(text = "结束")
+                            }
+                        }
+
+
+                        Spacer(modifier = Modifier.height(20.dp))
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth(),
+                            horizontalArrangement = Arrangement.Center,
+                        ) {
+                            Button(onClick = { showDialog = true }) {
+                                Text(text = "选择应用")
+                            }
+                            Spacer(modifier = Modifier.width(20.dp))
+                            Button(onClick = { selectedApp = null }) {
+                                Text(text = "清空选择")
+                            }
+
+                            if (showDialog) {
+                                AppPickerDialog(onDismissRequest = { showDialog = false }) { app ->
+                                    selectedApp = app
+                                    showDialog = false
+                                }
+                            }
+                        }
+                        selectedApp?.let { app ->
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.Center,
+                                modifier = Modifier
+                                    .padding(top = 16.dp)
+                                    .fillMaxWidth()
+                            ) {
+                                Image(
+                                    bitmap = app.icon,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(50.dp)
+                                )
+                                Spacer(modifier = Modifier.width(16.dp))
+                                Text(app.name)
+                            }
+                        }
+
                     }
-                },
-                buttons = {},
-            )
+                }
+                composable("测试") {
+                    Column(modifier = Modifier.padding(20.dp)) {
+                        Row(Modifier.fillMaxWidth()) {
+                            OutlinedTextField(
+                                value = serverAddress,
+                                onValueChange = { newValue ->
+                                    serverAddress = newValue
+                                },
+                                label = { Text("IP地址") },
+                                modifier = Modifier.weight(2f),
+                                keyboardOptions = KeyboardOptions(
+                                    keyboardType = KeyboardType.Number, imeAction = ImeAction.Next
+                                ),
+                                singleLine = true,
+                            )
+
+                            Spacer(modifier = Modifier.width(10.dp))
+                            OutlinedTextField(
+                                value = serverPort,
+                                onValueChange = { newValue ->
+                                    serverPort = newValue
+                                },
+                                label = { Text("端口号") },
+                                modifier = Modifier.weight(1f),
+                                keyboardOptions = KeyboardOptions(
+                                    keyboardType = KeyboardType.Number, imeAction = ImeAction.Done
+                                ),
+                                singleLine = true
+                            )
+                        }
+
+                        Row(Modifier.fillMaxWidth()) {
+                            OutlinedTextField(
+                                value = packetSize.toString(),
+                                onValueChange = { newValue ->
+                                    val value = newValue.toIntOrNull()
+                                    packetSize = value ?: 0
+                                },
+                                label = { Text("包的大小") },
+                                modifier = Modifier.weight(1f),
+                                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                                singleLine = true,
+                            )
+                            Spacer(modifier = Modifier.width(10.dp))
+                            OutlinedTextField(
+                                value = numTests.toString(),
+                                onValueChange = { newValue ->
+                                    val value = newValue.toIntOrNull()
+                                    numTests = value ?: 0
+                                },
+                                label = { Text("测试次数") },
+                                modifier = Modifier.weight(1f),
+                                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                                singleLine = true,
+                            )
+
+                            Spacer(modifier = Modifier.width(10.dp))
+                            OutlinedTextField(
+                                value = numThreads.toString(),
+                                onValueChange = { newValue ->
+                                    val value = newValue.toIntOrNull()
+                                    numThreads = value ?: 0
+                                },
+                                label = { Text("线程个数") },
+                                modifier = Modifier.weight(1f),
+                                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                                singleLine = true,
+                            )
+                        }
+
+
+                        Spacer(modifier = Modifier.height(20.dp))
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth(),
+                            horizontalArrangement = Arrangement.Center,
+                        ) {
+                            Button(
+                                onClick = {
+                                    showResult = true
+                                    averageLatency = 0
+                                    latencyList = mutableListOf()
+                                    testJob = CoroutineScope(Dispatchers.IO).launch {
+                                        for (thread in 0 until numThreads) {
+                                            launch {
+                                                for (i in 0 until numTests) {
+                                                    Log.d(TAG, "test thread=$thread, i=$i")
+                                                    val results = testTcpLatency(
+                                                        serverAddress,
+                                                        serverPort.toInt(),
+                                                        packetSize,
+                                                    )
+                                                    averageLatency =
+                                                        (averageLatency * i + results) / (i + 1)
+                                                    withContext(Dispatchers.Main) {
+                                                        latencyList = latencyList!! + results
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+
+                                },
+                            ) {
+                                Text("开始测试")
+                            }
+                            Spacer(modifier = Modifier.width(20.dp))
+                            Button(onClick = { testJob?.cancel() }) {
+                                Text("结束测试")
+                            }
+                            Spacer(modifier = Modifier.width(20.dp))
+                            Button(onClick = { showResult = false }) {
+                                Text("清空结果")
+                            }
+                        }
+                        Spacer(modifier = Modifier.height(16.dp))
+                        if (showResult) {
+                            latencyList?.let { results ->
+                                Text("平均延迟：${averageLatency}ms\n[${latencyList!!.size}/${numTests * numThreads}]：${results.joinToString()}")
+                            }
+                        }
+                    }
+
+                }
+            }
         }
+    }
 
-        if (syncResult.value.isNotEmpty()) {
-            AlertDialog(
-                onDismissRequest = {},
-                title = {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Text(syncResult.value)
-                        IconButton(onClick = { syncResult.value = "" }) {
-                            Icon(Icons.Default.Close, contentDescription = "关闭")
-                        }
-                    }
-                },
-                text = {
-                    Column {
-                        Text(" ${config.toJson()}")
-                    }
-                },
-                buttons = {
-
-                },
-            )
-        }
-
-        Column(modifier = Modifier.padding(20.dp)) {
-            Row(Modifier.fillMaxWidth()) {
-                OutlinedTextField(
-                    value = config.ipAddress!!,
-                    onValueChange = { newValue ->
-                        config = config.copy(ipAddress = newValue)
-                    },
-                    label = { Text("IP地址") },
-                    modifier = Modifier.weight(2f),
-                    keyboardOptions = KeyboardOptions(
-                        keyboardType = KeyboardType.Number,
-                        imeAction = ImeAction.Next
-                    ),
-                    singleLine = true,
-                    trailingIcon = {
-                        IconButton(onClick = { menuExpanded = true }) {
-                            Icon(Icons.Filled.ArrowDropDown, "")
-                        }
-                    }
-                )
-
-                DropdownMenu(
-                    expanded = menuExpanded,
-                    onDismissRequest = { menuExpanded = false },
-                    modifier = Modifier.weight(2f),
-                ) {
-                    ipAddresses.forEach { address ->
-                        DropdownMenuItem(onClick = {
-                            config = config.copy(ipAddress = address)
-                            menuExpanded = false
-                        }) {
-                            Text(address)
-                        }
-                    }
-                }
-                Spacer(modifier = Modifier.width(10.dp))
-                OutlinedTextField(
-                    value = config.port!!,
-                    onValueChange = { newValue ->
-                        config = config.copy(port = newValue)
-                    },
-                    label = { Text("端口号") },
-                    modifier = Modifier.weight(1f),
-                    keyboardOptions = KeyboardOptions(
-                        keyboardType = KeyboardType.Number,
-                        imeAction = ImeAction.Done
-                    ),
-                    singleLine = true
-                )
-            }
-
-            Row {
-                OutlinedTextField(
-                    value = config.maxTXNum.toString(),
-                    onValueChange = { newValue ->
-                        val value = newValue.toIntOrNull()
-                        config = if (value != null) {
-                            config.copy(maxTXNum = value)
-                        } else {
-                            config.copy(maxTXNum = 0)
-                        }
-                    },
-                    label = { Text("TX") },
-                    modifier = Modifier.weight(1f),
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                    singleLine = true,
-                )
-                Spacer(modifier = Modifier.width(10.dp))
-                OutlinedTextField(
-                    value = config.maxRXNum.toString(),
-                    onValueChange = { newValue ->
-                        val value = newValue.toIntOrNull()
-                        config = if (value != null) {
-                            config.copy(maxRXNum = value)
-                        } else {
-                            config.copy(maxRXNum = 0)
-                        }
-                    },
-                    label = { Text("RX") },
-                    modifier = Modifier.weight(1f),
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                    singleLine = true,
-                )
-
-            }
-            Spacer(modifier = Modifier.height(10.dp))
-            Row {
-                OutlinedTextField(
-                    value = config.encodeTimeout.toString(),
-                    onValueChange = { newValue ->
-                        val value = newValue.toLongOrNull()
-                        config = if (value != null) {
-                            config.copy(encodeTimeout = value)
-                        } else {
-                            config.copy(encodeTimeout = 0)
-                        }
-                    },
-                    label = { Text("编码超时 (微秒)") },
-                    modifier = Modifier.weight(1f),
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                    singleLine = true,
-                )
-                Spacer(modifier = Modifier.width(10.dp))
-                OutlinedTextField(
-                    value = config.decodeTimeout.toString(),
-                    onValueChange = { newValue ->
-                        val value = newValue.toLongOrNull()
-                        config = if (value != null) {
-                            config.copy(decodeTimeout = value)
-                        } else {
-                            config.copy(decodeTimeout = 0)
-                        }
-                    },
-                    label = { Text("解码超时 (微秒)") },
-                    modifier = Modifier.weight(1f),
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                    singleLine = true,
-                )
-                Spacer(modifier = Modifier.width(10.dp))
-                OutlinedTextField(
-                    value = config.rxTimeout.toString(),
-                    onValueChange = { newValue ->
-                        val value = newValue.toLongOrNull()
-                        config = if (value != null) {
-                            config.copy(rxTimeout = value)
-                        } else {
-                            config.copy(rxTimeout = 0)
-                        }
-                    },
-                    label = { Text("保序超时 (微秒)") },
-                    modifier = Modifier.weight(1f),
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                    singleLine = true,
-                )
-            }
-            Spacer(modifier = Modifier.height(10.dp))
-            Text(text = "保守发包率：${config.primaryProbability}%")
-            Slider(
-                value = primaryProbability, onValueChange = { newPosition ->
-                    primaryProbability = newPosition;
-                    config = config.copy(primaryProbability = newPosition.toInt())
-                },
-                valueRange = 0f..100f,
-                steps = 100
-            )
-            Spacer(modifier = Modifier.height(10.dp))
-            Text(text = "模拟丢包率：${config.dropRate}%")
-            Slider(
-                value = dropRate, onValueChange = { newPosition ->
-                    dropRate = newPosition
-                    config = config.copy(dropRate = dropRate.toInt())
-                },
-                valueRange = 0f..100f,
-                steps = 100
-            )
-            Text(text = "冗余率：${config.parityRate}%")
-            Slider(
-                value = parityRate, onValueChange = { newPosition ->
-                    parityRate = newPosition
-                    config = config.copy(parityRate = newPosition.toInt())
-                },
-                valueRange = 0f..100f,
-                steps = 100
-            )
-
-            Row(
-                modifier = Modifier
-                    .padding(20.dp)
-                    .fillMaxWidth(),
-                horizontalArrangement = Arrangement.Center,
-            ) {
-                Button(onClick = {
-                    startVpn(config, selectedApp?.packageName)
-                }) {
-                    Text(text = "开始")
-                }
-                Spacer(modifier = Modifier.width(20.dp))
-                Button(onClick = {
-                    launch {
-                        syncLoading.value = true
-                        syncResult.value = syncConfig(config)
-                        syncLoading.value = false
-                    }
-                }) {
-                    Text(text = "同步")
-                }
-                Spacer(modifier = Modifier.width(20.dp))
-                Button(onClick = ::stopVpn) {
-                    Text(text = "结束")
-                }
-            }
-            Row(
-                modifier = Modifier
-                    .padding(20.dp)
-                    .fillMaxWidth(),
-                horizontalArrangement = Arrangement.Center,
-            ) {
-                Button(onClick = { showDialog = true }) {
-                    Text(text = "选择应用")
-                }
-                Spacer(modifier = Modifier.width(20.dp))
-                Button(onClick = { selectedApp = null }) {
-                    Text(text = "清空选择")
-                }
-
-                if (showDialog) {
-                    AppPickerDialog(onDismissRequest = { showDialog = false }) { app ->
-                        selectedApp = app
-                        showDialog = false
-                    }
-                }
-            }
-            selectedApp?.let { app ->
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.Center,
-                    modifier = Modifier
-                        .padding(top = 16.dp)
-                        .fillMaxWidth()
-                ) {
-                    Image(
-                        bitmap = app.icon,
-                        contentDescription = null,
-                        modifier = Modifier.size(50.dp)
-                    )
-                    Spacer(modifier = Modifier.width(16.dp))
-                    Text(app.name)
-                }
-            }
-
-
-        }
+    private fun testTcpLatency(
+        serverAddress: String,
+        serverPort: Int,
+        packetSize: Int,
+    ): Long {
+        val socket = Socket(serverAddress, serverPort)
+        val outStream = DataOutputStream(socket.getOutputStream())
+        val inStream = DataInputStream(socket.getInputStream())
+        val data = ByteArray(packetSize)
+        val start = System.currentTimeMillis()
+        outStream.write(data)
+        outStream.flush()
+        inStream.readFully(ByteArray(packetSize))
+        val end = System.currentTimeMillis()
+        socket.close()
+        return end - start
     }
 
 
@@ -413,8 +608,7 @@ class MainActivity : ComponentActivity(), CoroutineScope by MainScope() {
                                 )
                                 Spacer(modifier = Modifier.width(16.dp))
                                 Text(
-                                    text = app.name,
-                                    style = MaterialTheme.typography.body1
+                                    text = app.name, style = MaterialTheme.typography.body1
                                 )
                             }
                             Divider()
@@ -494,6 +688,9 @@ class MainActivity : ComponentActivity(), CoroutineScope by MainScope() {
     private fun startVpn(
         config: HONConfig, appPackageName: String?
     ) {
+        if (config.dataNum <= 0) {
+            config.dataNum = 1
+        }
         val intent = VpnService.prepare(this)
         if (intent != null) {
             startActivityForResult(intent, VPN_REQUEST_CODE)

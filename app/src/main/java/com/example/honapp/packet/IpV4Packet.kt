@@ -22,13 +22,14 @@ class IpV4Packet() {
     }
 
     constructor(buffer: ByteBuffer) : this() {
+        val pos = buffer.position()
         header = IpV4Header(buffer)
 
         val totalLength = header!!.totalLength!!
         val headerLength = header!!.headerLength!!
 
         rawData = ByteArray(totalLength)
-        System.arraycopy(buffer.array(), 0, rawData!!, 0, totalLength)
+        System.arraycopy(buffer.array(), pos, rawData!!, 0, totalLength)
 
         payload = ByteArray(totalLength - headerLength)
         buffer.get(payload!!, 0, totalLength - headerLength)

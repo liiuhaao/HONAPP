@@ -5,9 +5,9 @@ import android.os.Parcelable
 
 data class HONConfig(
     var dropRate: Int,
-    var parityRate: Int,
-    var maxRXNum: Int,
-    var maxTXNum: Int,
+    var dataNum: Int,
+    var parityNum: Int,
+    var rxNum: Int,
     var encodeTimeout: Long,
     var decodeTimeout: Long,
     var rxTimeout: Long,
@@ -30,11 +30,11 @@ data class HONConfig(
 
     override fun writeToParcel(parcel: Parcel, flags: Int) {
         parcel.writeInt(dropRate)
-        parcel.writeInt(parityRate)
-        parcel.writeInt(maxRXNum)
-        parcel.writeInt(maxTXNum)
+        parcel.writeInt(dataNum)
+        parcel.writeInt(parityNum)
+        parcel.writeInt(rxNum)
         parcel.writeLong(encodeTimeout)
-        parcel.writeLong(encodeTimeout)
+        parcel.writeLong(decodeTimeout)
         parcel.writeLong(rxTimeout)
         parcel.writeInt(primaryProbability)
         parcel.writeString(ipAddress)
@@ -58,9 +58,9 @@ data class HONConfig(
     override fun toString(): String {
         return "HONConfig={" +
                 "dropRate=$dropRate," +
-                "parityRate=$parityRate," +
-                "maxRXNum=$maxRXNum," +
-                "maxTXNum=$maxTXNum," +
+                "dataNum=$dataNum," +
+                "parityNum=$parityNum," +
+                "rxNum=$rxNum," +
                 "encodeTimeout=$encodeTimeout," +
                 "decodeTimeout=$decodeTimeout," +
                 "rxTimeout=$rxTimeout" +
@@ -74,9 +74,9 @@ data class HONConfig(
         return """
             {
                 "dropRate": $dropRate,
-                "parityRate": $parityRate,
-                "maxRXNum": $maxRXNum,
-                "maxTXNum": $maxTXNum,
+                "dataNum": $dataNum,
+                "parityNum": $parityNum,
+                "rxNum": $rxNum,
                 "encodeTimeout": $encodeTimeout,
                 "decodeTimeout": $decodeTimeout,
                 "rxTimeout": $rxTimeout,

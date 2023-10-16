@@ -119,6 +119,7 @@ class HONVpnService() : VpnService(), CoroutineScope by CoroutineScope(Dispatche
             }
             Log.d(TAG, "REQUEST ${packet.header!!.protocol}: $packet")
             honFecService!!.outputChannel.send(packet)
+            Log.d(TAG, "Sent to HONFecService")
         }
     }
 
@@ -128,7 +129,9 @@ class HONVpnService() : VpnService(), CoroutineScope by CoroutineScope(Dispatche
             Log.d(TAG, "RESPONSE ${packet.header!!.protocol}: $packet")
             try {
                 withContext(Dispatchers.IO) {
-                    vpnOutputStream?.write(packet.rawData)
+                    vpnOutputStream?.write(packet.rawData) ?: run {
+                        Log.d(TAG, "vpnOutputStream is null")
+                    }
                 }
             } catch (e: IOException) {
                 e.printStackTrace();
