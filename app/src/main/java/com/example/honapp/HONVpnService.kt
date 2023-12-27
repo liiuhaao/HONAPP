@@ -43,10 +43,17 @@ class HONVpnService() : VpnService(), CoroutineScope by CoroutineScope(Dispatche
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        when (intent?.action) {
-            ACTION_STOP_VPN -> stopVpn()
-            else -> startVpn(intent)
+        // if ACTION_STOP_VPN and not alive: stopVpn(); if not ACTION_STOP_VPN then startVPN
+        when {
+            intent?.action == ACTION_STOP_VPN && alive -> stopVpn()
+            intent?.action != ACTION_STOP_VPN -> startVpn(intent)
         }
+        Log.d(TAG, "alive=$alive")
+
+//        when (intent?.action) {
+//            ACTION_STOP_VPN -> stopVpn()
+//            else -> startVpn(intent)
+//        }
         return START_NOT_STICKY
     }
 
@@ -54,17 +61,21 @@ class HONVpnService() : VpnService(), CoroutineScope by CoroutineScope(Dispatche
         if (intent != null) {
 
             val config: HONConfig? = intent.getParcelableExtra("CONFIG")
+            val primaryChannel: String = intent.getStringExtra("PRIMARY_CHANNEL")!!
             val appPackageName: String? = intent.getStringExtra("APP_PACKAGE_NAME")
 
             setupVpn(appPackageName)
             honFecService?.config = config
+            honFecService?.primaryChannel = primaryChannel
             honFecService!!.stop()
 
             val ipAddress = config!!.ipAddress
             val port = config.port!!.toInt()
             val inetAddress = InetAddress.getByName(ipAddress)
+
             honFecService!!.stop()
             honFecService!!.start(inetAddress, port)
+            alive = true
         }
     }
 
@@ -72,20 +83,23 @@ class HONVpnService() : VpnService(), CoroutineScope by CoroutineScope(Dispatche
         try {
             alive = false
             vpnInterface?.close()
-            vpnInputStream!!.close()
-            vpnOutputStream!!.close()
-            honFecService!!.stop()
+            vpnInputStream?.close()
+            vpnOutputStream?.close()
+            honFecService?.stop()
             stopSelf()
-            Log.i(TAG, "Stopped VPN servuce")
+            Log.i(TAG, "Stopped VPN service")
         } catch (e: IOException) {
             Log.e(TAG, "Failed to stop VPN service", e)
         }
     }
 
     private fun setupVpn(appPackageName: String?) {
-        val builder =
-            Builder().addAddress("10.10.0.15", 24).addDnsServer("8.8.8.8").addRoute("0.0.0.0", 0)
-                .setSession(TAG)
+        val builder = Builder()
+            .addAddress("10.10.0.15", 24)
+            .addDnsServer("8.8.8.8")
+            .addRoute("0.0.0.0", 0)
+            .setSession(TAG)
+            .setMtu(2000)
         if (appPackageName != null) {
             builder.addAllowedApplication(appPackageName)
         }

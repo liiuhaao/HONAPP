@@ -18,6 +18,8 @@ import java.nio.channels.SelectionKey
 import java.nio.channels.Selector
 import java.util.*
 import java.util.concurrent.atomic.AtomicBoolean
+import kotlin.math.max
+import kotlin.math.min
 import kotlin.time.Duration.Companion.microseconds
 
 class HONFecService(
@@ -37,30 +39,49 @@ class HONFecService(
     val outputChannel = Channel<IpV4Packet>()
 
     var config: HONConfig? = null
+    var primaryChannel = "Cellular"
 
 
     private var txID: UInt = 0u
     private val txMutex = Mutex()
 
+    // 接收端等包
     private var rxGroupId: UInt = 0u
     private var rxIndex: Int = 0
     private var rxNum: Int = 0
+    private var timeoutNum: Int = 0
     private val rxMutex = Mutex()
     private var rxList: LinkedList<Triple<IpV4Packet, Pair<UInt, Int>, Long>> = LinkedList()
 
+    // 统计接收端等包的时延情况
+    private var rxTime: Double = 0.0
+    private var rxCount: Long = 0
+    private var rxMin: Double = 1e18
+    private var rxMax: Double = -1.0
+
+    // 统计编码的时延情况
+    private var encTime: Double = -1.0
+    private var encMin: Double = 1e18
+    private var encMax: Double = -1.0
+
+    // 统计解码的时延情况
+    private var decTime: Double = -1.0
+    private var decMin: Double = 1e18
+    private var decMax: Double = -1.0
+
     private var alive = true
 
-    private var wifiUdpChannel: DatagramChannel? = null
+    // 双路，两个Channel
     private var cellularUdpChannel: DatagramChannel? = null
+    private var wifiUdpChannel: DatagramChannel? = null
 //    private var defaultUdpChannel: DatagramChannel? = null
 
+    // Channel的选择器
     private val selector = Selector.open()
 
-    private var wifiDelay: Long = 0
+    // 统计两种时延
     private var cellularDelay: Long = 0
-
-    private var wifiState: Boolean = true
-    private var cellularState: Boolean = true
+    private var wifiDelay: Long = 0
 
     private val maxBlockSize = 1200 - 20 - 8 - 24 // 1,448
     private val maxDataNum = 64
@@ -71,13 +92,32 @@ class HONFecService(
     private val cache = mutableMapOf<UInt, Channel<Pair<String, ByteBuffer>>>()
     private val cacheMutex = Mutex()
 
-    val isWifiAvailable = AtomicBoolean(false)
     val isCellularAvailable = AtomicBoolean(false)
+    val isWifiAvailable = AtomicBoolean(false)
 
     fun start(inetAddress: InetAddress, port: Int) {
         launch {
             if (setupFec(inetAddress, port)) {
+
+                // fec初始化
                 fecInit()
+
+                // 各种统计参数初始化
+                rxTime = 0.0
+                rxCount = 0
+                rxMin = 1e18
+                rxMax = -1.0
+                timeoutNum = 0
+
+                encTime = -1.0
+                encMin = 1e18
+                encMax = -1.0
+
+                decTime = -1.0
+                decMin = 1e18
+                decMax = -1.0
+
+                // 启动！
                 alive = true
                 launch { outputLoop() }
                 launch { inputLoop() }
@@ -105,14 +145,6 @@ class HONFecService(
 //        }
 //        tunnel.protect(defaultUdpChannel!!.socket())
 
-
-        wifiUdpChannel = withContext(Dispatchers.IO) {
-            DatagramChannel.open().apply {
-                configureBlocking(false)
-            }
-        }
-        tunnel.protect(wifiUdpChannel!!.socket())
-
         cellularUdpChannel = withContext(Dispatchers.IO) {
             DatagramChannel.open().apply {
                 configureBlocking(false)
@@ -120,22 +152,12 @@ class HONFecService(
         }
         tunnel.protect(cellularUdpChannel!!.socket())
 
-        val requestWifi =
-            NetworkRequest.Builder().addTransportType(NetworkCapabilities.TRANSPORT_WIFI).build()
-        connectivityManager.requestNetwork(requestWifi,
-            object : ConnectivityManager.NetworkCallback() {
-                @RequiresApi(Build.VERSION_CODES.M)
-                override fun onAvailable(network: Network) {
-                    try {
-                        network.bindSocket(wifiUdpChannel!!.socket())
-                        wifiUdpChannel!!.connect(InetSocketAddress(inetAddress, port))
-                        isWifiAvailable.set(true)
-                        Log.d(TAG, "WiFi Channel has established.")
-                    } catch (e: IOException) {
-                        Log.e(TAG, "WiFi Channel error!!!", e)
-                    }
-                }
-            })
+        wifiUdpChannel = withContext(Dispatchers.IO) {
+            DatagramChannel.open().apply {
+                configureBlocking(false)
+            }
+        }
+        tunnel.protect(wifiUdpChannel!!.socket())
 
         val requestCellular =
             NetworkRequest.Builder().addTransportType(NetworkCapabilities.TRANSPORT_CELLULAR)
@@ -156,6 +178,24 @@ class HONFecService(
                 }
 
             })
+
+        val requestWifi =
+            NetworkRequest.Builder().addTransportType(NetworkCapabilities.TRANSPORT_WIFI).build()
+        connectivityManager.requestNetwork(requestWifi,
+            object : ConnectivityManager.NetworkCallback() {
+                @RequiresApi(Build.VERSION_CODES.M)
+                override fun onAvailable(network: Network) {
+                    try {
+                        network.bindSocket(wifiUdpChannel!!.socket())
+                        wifiUdpChannel!!.connect(InetSocketAddress(inetAddress, port))
+                        isWifiAvailable.set(true)
+                        Log.d(TAG, "WiFi Channel has established.")
+                    } catch (e: IOException) {
+                        Log.e(TAG, "WiFi Channel error!!!", e)
+                    }
+                }
+            })
+        Log.d("TAG", "setupFec, requestWifi")
 
 //        try {
 //            Log.d(TAG, "Set up $inetAddress, $port")
@@ -196,7 +236,38 @@ class HONFecService(
 
         loop@ while (true) {
             val packet = outputChannel.receive()
+            Log.d(TAG, "output try lock outputMUTEX")
             outputMutex.lock()
+            Log.d(TAG, "output locked outputMUTEX")
+
+            Log.d(TAG,"primaryChannel=$primaryChannel, ${isCellularAvailable.get()}, ${primaryChannel=="Cellular"}")
+            val dataChannel =
+                if ((primaryChannel=="Cellular" && isCellularAvailable.get()) || !isWifiAvailable.get()) {
+                    Log.d(TAG, "dataChannel is Cellular")
+                    cellularUdpChannel
+                } else {
+                    Log.d(TAG, "dataChannel is Wifi")
+                    wifiUdpChannel
+                }
+
+
+//            val buffer = ByteBuffer.allocate(bufferSize)
+//            buffer.put(packet.rawData!!)
+//            buffer.flip()
+//            if (dataChannel!!.isConnected) {
+//                withContext(Dispatchers.IO) {
+//                    try {
+//                        dataChannel.write(buffer)
+//                    } catch (e: PortUnreachableException) {
+//                        Log.e("Error", "PortUnreachableException")
+//                    } catch (e: IOException) {
+//                        Log.e("Error", "IOException")
+//                    }
+//                }
+//            }
+//            outputMutex.unlock()
+//            continue@loop
+
             index += 1
 
             packetBuffers[index] = packet.rawData!!
@@ -204,12 +275,9 @@ class HONFecService(
             if (index == 0) {
                 groupId = getGroupId()
             }
+            Log.d(TAG, "output index=$index")
 
-            val dataChannel = if (isCellularAvailable.get()) {
-                cellularUdpChannel
-            } else {
-                wifiUdpChannel
-            }
+
 
             outputSend(
                 groupId,
@@ -218,6 +286,7 @@ class HONFecService(
                 dataChannel
             )
 
+            Log.d(TAG, "output start encode things.")
             if (index + 1 == config!!.dataNum) {
                 if (config!!.parityNum > 0) {
                     val blockSize = packetBuffers.maxOf { it.size }
@@ -230,13 +299,39 @@ class HONFecService(
                         }
                     }
 
+
+                    val beforeEnc = System.nanoTime()
+
                     val encodedData = encode(config!!.dataNum, blockNum, packetBuffers, blockSize)
 
-                    val parityChannel = if (isWifiAvailable.get()) {
-                        wifiUdpChannel
+                    val afterEnc = System.nanoTime()
+                    val timeDelta = afterEnc - beforeEnc
+                    encTime = if (encTime < 0) {
+                        timeDelta.toDouble()
                     } else {
-                        cellularUdpChannel
+                        encTime * 0.9 + timeDelta * 0.1
                     }
+                    encMax = max(encMax, timeDelta.toDouble())
+                    encMin = min(encMin, timeDelta.toDouble())
+                    Log.d(
+                        TAG,
+                        "encode timeDelta=$timeDelta, encTime=$encTime, encMin=$encMin, encMax=$encMax"
+                    )
+
+                    val parityChannel =
+                        if (isWifiAvailable.get() && primaryChannel == "Cellular" || !isCellularAvailable.get()) {
+                            Log.d(TAG, "parityChannel is Wifi")
+                            wifiUdpChannel
+                        } else {
+                            Log.d(TAG, "parityChannel is Cellular")
+                            cellularUdpChannel
+                        }
+
+//                    val parityChannel = if (isWifiAvailable.get()) {
+//                        wifiUdpChannel
+//                    } else {
+//                        cellularUdpChannel
+//                    }
 
                     for (parityIndex in 0 until config!!.parityNum) {
                         outputSend(
@@ -251,6 +346,7 @@ class HONFecService(
                 index = -1
             }
 
+            Log.d(TAG, "output start encode things done.")
             outputMutex.unlock()
         }
     }
@@ -317,6 +413,10 @@ class HONFecService(
         if (udpChannel == null) {
             return
         }
+//        if (index == config!!.dataNum - 1) {
+//            Log.d(TAG, "outputSend dropout")
+//            return
+//        }
         if ((1..100).random() <= config!!.dropRate) {
             Log.d(TAG, "outputSend dropout")
             return
@@ -330,14 +430,15 @@ class HONFecService(
         buffer.putLong(packetSendTime)
         buffer.put(block)
 
+
         buffer.flip()
         if (udpChannel.isConnected) {
             withContext(Dispatchers.IO) {
                 try {
-//                    Log.d(
-//                        TAG,
-//                        "sendBlock: groupId=$groupID, index=$index, block=$block"
-//                    )
+                    Log.d(
+                        TAG,
+                        "sendBlock: groupId=$groupID, index=$index, block=$block, size=${buffer.remaining()}"
+                    )
                     udpChannel.write(buffer)
                 } catch (e: PortUnreachableException) {
                     Log.e("Error", "PortUnreachableException")
@@ -400,14 +501,14 @@ class HONFecService(
                 if (index >= config!!.dataNum + config!!.parityNum) {
                     continue
                 }
+//                if(index==config!!.dataNum-1){
+//                    continue
+//                }
                 val randomNum = (1..100).random()
                 if (randomNum <= (config!!.dropRate)) {
                     Log.d(TAG, "handleDecode: groupId=$groupId, index=$index dropout $randomNum")
                     continue
                 }
-//                if(index<2){
-//                    continue
-//                }
 
                 val packetReceiveTime = System.currentTimeMillis()
                 if (channelType == "wifi") {
@@ -415,7 +516,6 @@ class HONFecService(
                 } else {
                     cellularDelay = packetReceiveTime - packetSendTime
                 }
-
 
                 if (marks[index] == 0) {
                     continue
@@ -460,8 +560,25 @@ class HONFecService(
                         }
                     }
 
+                    val beforeDec = System.nanoTime()
+
                     val decodeBlocks =
                         decode(config!!.dataNum, blockNum, dataBlocks, blockSize)
+
+                    val afterDec = System.nanoTime()
+                    val timeDelta = afterDec - beforeDec
+                    decTime = if (encTime < 0) {
+                        timeDelta.toDouble()
+                    } else {
+                        decTime * 0.9 + timeDelta * 0.1
+                    }
+                    decMax = max(decMax, timeDelta.toDouble())
+                    decMin = min(decMin, timeDelta.toDouble())
+                    Log.d(
+                        TAG,
+                        "decode timeDelta=$timeDelta, decTime=$decTime, decMin=$decMin, decMax=$decMax"
+                    )
+
 
                     rxMutex.lock()
                     for (i in 0 until config!!.dataNum) {
@@ -518,6 +635,26 @@ class HONFecService(
                     break
                 }
             }
+            if (isTimeout) {
+                timeoutNum += 1
+            }
+            val timeDelta = now - rxList.first.third
+            if (rxCount == 0.toLong()) {
+                rxTime = timeDelta.toDouble()
+                rxCount += 1
+            } else {
+                rxTime += timeDelta.toDouble()
+                rxCount += 1
+            }
+            rxMax = max(rxMax, timeDelta.toDouble())
+            rxMin = min(rxMin, timeDelta.toDouble())
+            Log.d(
+                TAG,
+                "rxSend, timeDelta=$timeDelta, rxTime=${rxTime / rxCount}, " +
+                        "rxMin=$rxMin, rxMax=$rxMax, " +
+                        "timeoutRate=${timeoutNum.toDouble() / rxCount.toDouble()}, " +
+                        "rxRate=${rxCount.toDouble() / (rxPair.first * config!!.dataNum.toUInt() + rxPair.second.toUInt() + 1u).toDouble()}"
+            )
             inputChannel.send(rx.first)
             if (rxPair.second == config!!.dataNum - 1) {
                 rxGroupId = rxPair.first + 1u

@@ -47,7 +47,10 @@ import com.example.honapp.ui.theme.HONAPPTheme
 import kotlinx.coroutines.*
 import java.io.DataInputStream
 import java.io.DataOutputStream
+import java.net.ServerSocket
 import java.net.Socket
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicInteger
 
 class MainActivity : ComponentActivity(), CoroutineScope by MainScope() {
 
@@ -60,8 +63,6 @@ class MainActivity : ComponentActivity(), CoroutineScope by MainScope() {
     @RequiresApi(Build.VERSION_CODES.O)
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-
-
         setContent {
             HONAPPTheme {
                 SetContentView()
@@ -74,21 +75,22 @@ class MainActivity : ComponentActivity(), CoroutineScope by MainScope() {
     @Composable
     fun SetContentView() {
 
+        // 导航栏
         val navController = rememberNavController()
         val items = listOf("VPN", "测试")
 
-
+        // 选取的APP
         var selectedApp by remember { mutableStateOf<AppInfo?>(null) }
 
         var showDialog by remember { mutableStateOf(false) }
 
-
+        // 配置
         var config by remember {
             mutableStateOf(
                 HONConfig(
                     dropRate = 0,
-                    dataNum = 10,
-                    parityNum = 5,
+                    dataNum = 5,
+                    parityNum = 0,
                     rxNum = 100,
                     encodeTimeout = 1000000,
                     decodeTimeout = 1000000,
@@ -100,22 +102,28 @@ class MainActivity : ComponentActivity(), CoroutineScope by MainScope() {
             )
         }
 
-        val ipAddresses = listOf("106.75.241.183", "106.75.227.236")
+        // ip地址选取
+        val ipAddresses = listOf("106.75.241.183", "106.75.227.194", "202.120.87.33")
         var menuExpanded by remember { mutableStateOf(false) }
 
+        // 选择那一条路是主路
+        val primaryChannel = remember { mutableStateOf("Cellular") }
+
+        // 显示同步状态
         val syncResult = remember { mutableStateOf("") }
 
+        // 时延测试的配置
         var serverAddress by remember { mutableStateOf("106.75.227.194") }
         var serverPort by remember { mutableStateOf("33333") }
         var packetSize by remember { mutableStateOf(1024) }
         var numTests by remember { mutableStateOf(100) }
-        var numThreads by remember { mutableStateOf(1) }
+        var numThreads by remember { mutableStateOf(10) }
 
+        // 时延测试的输出
         var showResult by remember { mutableStateOf(false) }
         var averageLatency by remember { mutableStateOf(0L) }
         var latencyList by remember { mutableStateOf<List<Long>?>(null) }
         var testJob: Job? = null
-
 
         Scaffold(bottomBar = {
             BottomNavigation {
@@ -132,8 +140,7 @@ class MainActivity : ComponentActivity(), CoroutineScope by MainScope() {
                             "测试" -> Icon(
                                 Icons.Default.Send, contentDescription = null
                             )
-
-                            else -> Unit // 可以添加更多的图标
+                            else -> Unit
                         }
                     },
                         label = { Text(item) },
@@ -354,6 +361,21 @@ class MainActivity : ComponentActivity(), CoroutineScope by MainScope() {
                                 singleLine = true,
                             )
                         }
+                        Spacer(modifier = Modifier.height(20.dp))
+                        Row(Modifier.fillMaxWidth().padding(bottom = 16.dp)) {
+                            Text("主路选择：", modifier = Modifier.align(Alignment.CenterVertically))
+                            Spacer(modifier = Modifier.width(10.dp))
+                            Switch(
+                                checked = primaryChannel.value == "Wifi",
+                                onCheckedChange = { isChecked ->
+                                    primaryChannel.value = if (isChecked) "Wifi" else "Cellular"
+                                }
+                            )
+                            Text(
+                                if (primaryChannel.value == "Wifi") "Wifi" else "Cellular",
+                                modifier = Modifier.align(Alignment.CenterVertically).padding(start = 8.dp)
+                            )
+                        }
 
                         Spacer(modifier = Modifier.height(20.dp))
                         Row(
@@ -362,19 +384,15 @@ class MainActivity : ComponentActivity(), CoroutineScope by MainScope() {
                             horizontalArrangement = Arrangement.Center,
                         ) {
                             Button(onClick = {
-                                startVpn(config, selectedApp?.packageName)
-                            }) {
-                                Text(text = "开始")
-                            }
-                            Spacer(modifier = Modifier.width(20.dp))
-                            Button(onClick = {
                                 launch {
+                                    stopVpn()
                                     syncResult.value = "Loading"
                                     syncResult.value = syncConfig(config)
                                     syncResult.value = ""
+                                    startVpn(config, primaryChannel.value, selectedApp?.packageName)
                                 }
                             }) {
-                                Text(text = "同步")
+                                Text(text = "开始")
                             }
                             Spacer(modifier = Modifier.width(20.dp))
                             Button(onClick = ::stopVpn) {
@@ -404,6 +422,8 @@ class MainActivity : ComponentActivity(), CoroutineScope by MainScope() {
                                 }
                             }
                         }
+
+
                         selectedApp?.let { app ->
                             Row(
                                 verticalAlignment = Alignment.CenterVertically,
@@ -479,7 +499,6 @@ class MainActivity : ComponentActivity(), CoroutineScope by MainScope() {
                                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                                 singleLine = true,
                             )
-
                             Spacer(modifier = Modifier.width(10.dp))
                             OutlinedTextField(
                                 value = numThreads.toString(),
@@ -526,6 +545,7 @@ class MainActivity : ComponentActivity(), CoroutineScope by MainScope() {
                                         }
                                     }
 
+
                                 },
                             ) {
                                 Text("开始测试")
@@ -552,6 +572,7 @@ class MainActivity : ComponentActivity(), CoroutineScope by MainScope() {
         }
     }
 
+    // 串行测试时延
     private fun testTcpLatency(
         serverAddress: String,
         serverPort: Int,
@@ -571,6 +592,7 @@ class MainActivity : ComponentActivity(), CoroutineScope by MainScope() {
     }
 
 
+    // 选取APP（只转发这个APP的包）
     @RequiresApi(Build.VERSION_CODES.O)
     @Composable
     fun AppPickerDialog(onDismissRequest: () -> Unit, onAppSelected: (AppInfo) -> Unit) {
@@ -621,6 +643,7 @@ class MainActivity : ComponentActivity(), CoroutineScope by MainScope() {
 
     data class AppInfo(val name: String, val packageName: String, val icon: ImageBitmap)
 
+    // 获取APP列表
     @RequiresApi(Build.VERSION_CODES.O)
     private fun getAppList(context: Context): List<AppInfo> {
         val pm = context.packageManager
@@ -651,7 +674,7 @@ class MainActivity : ComponentActivity(), CoroutineScope by MainScope() {
             }
     }
 
-
+    // 和服务器同步配置
     private suspend fun syncConfig(
         config: HONConfig,
     ): String {
@@ -685,8 +708,9 @@ class MainActivity : ComponentActivity(), CoroutineScope by MainScope() {
         }
     }
 
+    // 启动！
     private fun startVpn(
-        config: HONConfig, appPackageName: String?
+        config: HONConfig, primaryChannel: String, appPackageName: String?
     ) {
         if (config.dataNum <= 0) {
             config.dataNum = 1
@@ -698,12 +722,14 @@ class MainActivity : ComponentActivity(), CoroutineScope by MainScope() {
             launch {
                 val vpnIntent = Intent(this@MainActivity, HONVpnService::class.java)
                 vpnIntent.putExtra("CONFIG", config)
+                vpnIntent.putExtra("PRIMARY_CHANNEL", primaryChannel)
                 vpnIntent.putExtra("APP_PACKAGE_NAME", appPackageName)
                 startService(vpnIntent)
             }
         }
     }
 
+    // 关闭
     private fun stopVpn() {
         launch {
             val intent = Intent(this@MainActivity, HONVpnService::class.java)
