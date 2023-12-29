@@ -4,6 +4,7 @@ import android.content.Context
 import android.content.Intent
 import android.net.ConnectivityManager
 import android.net.VpnService
+import android.os.Bundle
 import android.os.ParcelFileDescriptor
 import android.util.Log
 import com.example.honapp.packet.IpV4Packet
@@ -22,6 +23,8 @@ class HONVpnService() : VpnService(), CoroutineScope by CoroutineScope(Dispatche
     companion object {
         private const val TAG = "HONVpnService"
         const val ACTION_STOP_VPN = "com.example.honapp.STOP_VPN"
+        const val ACTION_REQUEST_DATA = "com.example.honapp.GET_DATA"
+        const val ACTION_DATA_AVAILABLE = "com.example.ACTION_DATA_AVAILABLE"
     }
 
     private val inputCh = Channel<IpV4Packet>()
@@ -43,18 +46,26 @@ class HONVpnService() : VpnService(), CoroutineScope by CoroutineScope(Dispatche
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        // if ACTION_STOP_VPN and not alive: stopVpn(); if not ACTION_STOP_VPN then startVPN
         when {
             intent?.action == ACTION_STOP_VPN && alive -> stopVpn()
-            intent?.action != ACTION_STOP_VPN -> startVpn(intent)
+            intent?.action == ACTION_REQUEST_DATA-> sendData()
+            else -> startVpn(intent)
         }
         Log.d(TAG, "alive=$alive")
-
-//        when (intent?.action) {
-//            ACTION_STOP_VPN -> stopVpn()
-//            else -> startVpn(intent)
-//        }
         return START_NOT_STICKY
+    }
+
+    private fun sendData() {
+        if (honFecService == null) {
+            return
+        }
+        val dataIntent = Intent("com.example.ACTION_DATA_AVAILABLE")
+        val bundle = Bundle()
+        for ((key, value) in honFecService!!.getInfo()) {
+            bundle.putString(key, value.toString())
+        }
+        dataIntent.putExtra("honVpnData", bundle)
+        sendBroadcast(dataIntent)
     }
 
     private fun startVpn(intent: Intent?) {

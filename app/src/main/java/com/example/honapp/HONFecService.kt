@@ -52,6 +52,8 @@ class HONFecService(
     private var timeoutNum: Int = 0
     private val rxMutex = Mutex()
     private var rxList: LinkedList<Triple<IpV4Packet, Pair<UInt, Int>, Long>> = LinkedList()
+    private var rxTotal: Int = 1
+    private var rxRate: Double = 0.0
 
     // 统计接收端等包的时延情况
     private var rxTime: Double = 0.0
@@ -135,6 +137,18 @@ class HONFecService(
             it.cancel()
         }
         Log.i(TAG, "Stop service")
+    }
+
+    fun getInfo(): MutableMap<String, Any> {
+        val res = mutableMapOf<String, Any>()
+        res["rxTime"] = rxTime / rxCount
+        res["rxMin"] = rxMin
+        res["rxMax"] = rxMax
+        res["timeoutRate"] = timeoutNum.toDouble() / rxCount.toDouble()
+        res["rxRate"] = rxRate
+        res["rxCount"] = rxCount
+        res["rxTotal"] = rxTotal
+        return res
     }
 
     private suspend fun setupFec(inetAddress: InetAddress, port: Int): Boolean {
@@ -240,9 +254,12 @@ class HONFecService(
             outputMutex.lock()
             Log.d(TAG, "output locked outputMUTEX")
 
-            Log.d(TAG,"primaryChannel=$primaryChannel, ${isCellularAvailable.get()}, ${primaryChannel=="Cellular"}")
+            Log.d(
+                TAG,
+                "primaryChannel=$primaryChannel, ${isCellularAvailable.get()}, ${primaryChannel == "Cellular"}"
+            )
             val dataChannel =
-                if ((primaryChannel=="Cellular" && isCellularAvailable.get()) || !isWifiAvailable.get()) {
+                if ((primaryChannel == "Cellular" && isCellularAvailable.get()) || !isWifiAvailable.get()) {
                     Log.d(TAG, "dataChannel is Cellular")
                     cellularUdpChannel
                 } else {
@@ -648,13 +665,9 @@ class HONFecService(
             }
             rxMax = max(rxMax, timeDelta.toDouble())
             rxMin = min(rxMin, timeDelta.toDouble())
-            Log.d(
-                TAG,
-                "rxSend, timeDelta=$timeDelta, rxTime=${rxTime / rxCount}, " +
-                        "rxMin=$rxMin, rxMax=$rxMax, " +
-                        "timeoutRate=${timeoutNum.toDouble() / rxCount.toDouble()}, " +
-                        "rxRate=${rxCount.toDouble() / (rxPair.first * config!!.dataNum.toUInt() + rxPair.second.toUInt() + 1u).toDouble()}"
-            )
+            rxTotal =(rxPair.first.toInt() * config!!.dataNum + rxPair.second + 1)
+            rxRate = rxCount.toDouble() / rxTotal.toDouble();
+
             inputChannel.send(rx.first)
             if (rxPair.second == config!!.dataNum - 1) {
                 rxGroupId = rxPair.first + 1u

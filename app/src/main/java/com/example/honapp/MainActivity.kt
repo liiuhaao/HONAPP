@@ -1,8 +1,10 @@
 package com.example.honapp
 
 import android.annotation.SuppressLint
+import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.ApplicationInfo
 import android.graphics.Bitmap
 import android.graphics.Canvas
@@ -25,7 +27,6 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.*
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowDropDown
-import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Send
 import androidx.compose.runtime.*
@@ -38,19 +39,18 @@ import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
-import androidx.navigation.NavController
+import androidx.core.app.ActivityCompat.startActivityForResult
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import com.example.honapp.ui.theme.HONAPPTheme
+import com.google.gson.Gson
+import com.google.gson.reflect.TypeToken
 import kotlinx.coroutines.*
 import java.io.DataInputStream
 import java.io.DataOutputStream
-import java.net.ServerSocket
 import java.net.Socket
-import java.util.concurrent.ConcurrentHashMap
-import java.util.concurrent.atomic.AtomicInteger
 
 class MainActivity : ComponentActivity(), CoroutineScope by MainScope() {
 
@@ -58,6 +58,9 @@ class MainActivity : ComponentActivity(), CoroutineScope by MainScope() {
         private const val TAG = "HONMainActivity"
         private const val VPN_REQUEST_CODE = 0
         private const val SYNC_PORT = 34543
+        private const val REQUEST_PORT = 33333
+        private const val TYPE_SYNC_CONFIG: Byte = 0x01
+        private const val TYPE_REQUEST_DATA: Byte = 0x02
     }
 
     @RequiresApi(Build.VERSION_CODES.O)
@@ -71,7 +74,7 @@ class MainActivity : ComponentActivity(), CoroutineScope by MainScope() {
     }
 
     @RequiresApi(Build.VERSION_CODES.O)
-    @SuppressLint("UnusedMaterialScaffoldPaddingParameter")
+    @SuppressLint("UnusedMaterialScaffoldPaddingParameter", "UnspecifiedRegisterReceiverFlag")
     @Composable
     fun SetContentView() {
 
@@ -125,6 +128,33 @@ class MainActivity : ComponentActivity(), CoroutineScope by MainScope() {
         var latencyList by remember { mutableStateOf<List<Long>?>(null) }
         var testJob: Job? = null
 
+        val serverData = remember { mutableStateOf<Map<String, String>?>(null) }
+        val clientData = remember { mutableStateOf<Map<String, String>?>(null) }
+
+        // 好像是用来监听vpnIntent的广播，用来接收数据的，gpt写的
+        val context = LocalContext.current
+        DisposableEffect(Unit) {
+            val vpnDataReceiver = object : BroadcastReceiver() {
+                override fun onReceive(context: Context, intent: Intent) {
+                    if (intent.action == "com.example.ACTION_DATA_AVAILABLE") {
+                        val bundle = intent.getBundleExtra("honVpnData")
+                        val dataMap = bundle?.keySet()?.associateWith { key ->
+                            bundle.getString(key).orEmpty()
+                        }
+                        clientData.value = dataMap
+                    }
+                }
+            }
+
+            val filter = IntentFilter("com.example.ACTION_DATA_AVAILABLE")
+            context.registerReceiver(vpnDataReceiver, filter)
+
+            onDispose {
+                context.unregisterReceiver(vpnDataReceiver)
+            }
+        }
+
+        // 视图，分了两个页面，一个是VPN，一个是测试
         Scaffold(bottomBar = {
             BottomNavigation {
                 val navBackStackEntry by navController.currentBackStackEntryAsState()
@@ -140,6 +170,7 @@ class MainActivity : ComponentActivity(), CoroutineScope by MainScope() {
                             "测试" -> Icon(
                                 Icons.Default.Send, contentDescription = null
                             )
+
                             else -> Unit
                         }
                     },
@@ -158,6 +189,7 @@ class MainActivity : ComponentActivity(), CoroutineScope by MainScope() {
             }
         }) {
             NavHost(navController = navController, startDestination = "VPN") {
+                // VPN页面
                 composable("VPN") {
                     if (syncResult.value.isNotEmpty()) {
                         AlertDialog(
@@ -362,29 +394,33 @@ class MainActivity : ComponentActivity(), CoroutineScope by MainScope() {
                             )
                         }
                         Spacer(modifier = Modifier.height(20.dp))
-                        Row(Modifier.fillMaxWidth().padding(bottom = 16.dp)) {
+                        Row(
+                            Modifier
+                                .fillMaxWidth()
+                                .padding(bottom = 16.dp)
+                        ) {
                             Text("主路选择：", modifier = Modifier.align(Alignment.CenterVertically))
                             Spacer(modifier = Modifier.width(10.dp))
-                            Switch(
-                                checked = primaryChannel.value == "Wifi",
+                            Switch(checked = primaryChannel.value == "Wifi",
                                 onCheckedChange = { isChecked ->
                                     primaryChannel.value = if (isChecked) "Wifi" else "Cellular"
-                                }
-                            )
+                                })
                             Text(
                                 if (primaryChannel.value == "Wifi") "Wifi" else "Cellular",
-                                modifier = Modifier.align(Alignment.CenterVertically).padding(start = 8.dp)
+                                modifier = Modifier
+                                    .align(Alignment.CenterVertically)
+                                    .padding(start = 8.dp)
                             )
                         }
 
                         Spacer(modifier = Modifier.height(20.dp))
                         Row(
-                            modifier = Modifier
-                                .fillMaxWidth(),
+                            modifier = Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.Center,
                         ) {
                             Button(onClick = {
                                 launch {
+                                    // 先结束vpn，然后再同步配置，最后开始vpn
                                     stopVpn()
                                     syncResult.value = "Loading"
                                     syncResult.value = syncConfig(config)
@@ -403,8 +439,7 @@ class MainActivity : ComponentActivity(), CoroutineScope by MainScope() {
 
                         Spacer(modifier = Modifier.height(20.dp))
                         Row(
-                            modifier = Modifier
-                                .fillMaxWidth(),
+                            modifier = Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.Center,
                         ) {
                             Button(onClick = { showDialog = true }) {
@@ -444,6 +479,7 @@ class MainActivity : ComponentActivity(), CoroutineScope by MainScope() {
 
                     }
                 }
+                // 测试页面
                 composable("测试") {
                     Column(modifier = Modifier.padding(20.dp)) {
                         Row(Modifier.fillMaxWidth()) {
@@ -516,8 +552,7 @@ class MainActivity : ComponentActivity(), CoroutineScope by MainScope() {
 
                         Spacer(modifier = Modifier.height(20.dp))
                         Row(
-                            modifier = Modifier
-                                .fillMaxWidth(),
+                            modifier = Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.Center,
                         ) {
                             Button(
@@ -530,22 +565,20 @@ class MainActivity : ComponentActivity(), CoroutineScope by MainScope() {
                                             launch {
                                                 for (i in 0 until numTests) {
                                                     Log.d(TAG, "test thread=$thread, i=$i")
-                                                    val results = testTcpLatency(
+                                                    val latencyResults = testTcpLatency(
                                                         serverAddress,
                                                         serverPort.toInt(),
                                                         packetSize,
                                                     )
                                                     averageLatency =
-                                                        (averageLatency * i + results) / (i + 1)
+                                                        (averageLatency * i + latencyResults) / (i + 1)
                                                     withContext(Dispatchers.Main) {
-                                                        latencyList = latencyList!! + results
+                                                        latencyList = latencyList!! + latencyResults
                                                     }
                                                 }
                                             }
                                         }
                                     }
-
-
                                 },
                             ) {
                                 Text("开始测试")
@@ -559,10 +592,78 @@ class MainActivity : ComponentActivity(), CoroutineScope by MainScope() {
                                 Text("清空结果")
                             }
                         }
+
+                        Spacer(modifier = Modifier.height(16.dp))
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.Center,
+                        ) {
+                            Button(onClick = {
+                                launch {
+                                    showResult = true
+                                    val intent =
+                                        Intent(this@MainActivity, HONVpnService::class.java)
+                                    intent.action = HONVpnService.ACTION_REQUEST_DATA
+                                    startService(intent)
+                                }
+                            }) {
+                                Text("获取客户端测试结果报告")
+                            }
+
+                        }
+                        Spacer(modifier = Modifier.height(16.dp))
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.Center,
+                        ) {
+                            Button(onClick = {
+                                launch {
+                                    stopVpn()
+                                    showResult = true
+                                    serverData.value = requestDataFromServer(config)
+                                }
+                            }) {
+                                Text("获取服务端测试结果报告（会自动断连VPN）")
+                            }
+                        }
                         Spacer(modifier = Modifier.height(16.dp))
                         if (showResult) {
-                            latencyList?.let { results ->
-                                Text("平均延迟：${averageLatency}ms\n[${latencyList!!.size}/${numTests * numThreads}]：${results.joinToString()}")
+//                            latencyList?.let { results ->
+//                                Text("平均延迟：${averageLatency}ms\n[${latencyList!!.size}/${numTests * numThreads}]：${results.joinToString()}")
+//                            }
+                            Column {
+                                if (latencyList != null) {
+                                    Text("平均延迟：${averageLatency}ms [${latencyList!!.size}/${numTests * numThreads}]")
+                                    Spacer(modifier = Modifier.height(20.dp))
+                                }
+                                clientData.value?.let { dataMap ->
+                                    Text("客户端接收数据包比: ${"%.2f%%".format((dataMap["rxRate"]?.toDouble() ?: 0.0) * 100)} [${dataMap["rxCount"]}/${dataMap["rxTotal"]}]")
+                                    Text("客户端等包超时比: ${"%.2f%%".format((dataMap["timeoutRate"]?.toDouble() ?: 0.0) * 100)}")
+                                    Text(
+                                        "客户端平均等包时间(最短时间/最长时间): ${
+                                            "%.2f(%.2f/%.2f)".format(
+                                                dataMap["rxTime"]?.toDoubleOrNull() ?: 0.0,
+                                                dataMap["rxMin"]?.toDoubleOrNull() ?: 0.0,
+                                                dataMap["rxMax"]?.toDoubleOrNull() ?: 0.0
+                                            )
+                                        }"
+                                    )
+                                    Spacer(modifier = Modifier.height(20.dp))
+                                }
+                                serverData.value?.let { dataMap ->
+                                    Text("服务端接收数据包比: ${"%.2f%%".format((dataMap["rx_rate"]?.toDouble() ?: 0.0) * 100)} [${dataMap["rx_count"]}/${dataMap["rx_total"]}]")
+                                    Text("服务端等包超时比: ${"%.2f%%".format((dataMap["timeout_rate"]?.toDouble() ?: 0.0) * 100)}")
+                                    Text(
+                                        "服务端平均等包时间(最短时间/最长时间): ${
+                                            "%.2f(%.2f/%.2f)".format(
+                                                dataMap["rx_time"]?.toDoubleOrNull() ?: 0.0,
+                                                dataMap["rx_min"]?.toDoubleOrNull() ?: 0.0,
+                                                dataMap["rx_max"]?.toDoubleOrNull() ?: 0.0
+                                            )
+                                        }"
+                                    )
+                                    Spacer(modifier = Modifier.height(20.dp))
+                                }
                             }
                         }
                     }
@@ -571,6 +672,7 @@ class MainActivity : ComponentActivity(), CoroutineScope by MainScope() {
             }
         }
     }
+
 
     // 串行测试时延
     private fun testTcpLatency(
@@ -689,6 +791,7 @@ class MainActivity : ComponentActivity(), CoroutineScope by MainScope() {
 
         withContext(Dispatchers.IO) {
             val outStream = socket.getOutputStream()
+            outStream.write(byteArrayOf(TYPE_SYNC_CONFIG))
             outStream.write(jsonConfig.toByteArray())
             outStream.flush()
 
@@ -708,34 +811,67 @@ class MainActivity : ComponentActivity(), CoroutineScope by MainScope() {
         }
     }
 
-    // 启动！
-    private fun startVpn(
-        config: HONConfig, primaryChannel: String, appPackageName: String?
-    ) {
-        if (config.dataNum <= 0) {
-            config.dataNum = 1
+    private suspend fun requestDataFromServer(
+        config: HONConfig,
+    ): Map<String, String> {
+        delay(1000)
+        val inetAddress = config.ipAddress
+        val socket = withContext(Dispatchers.IO) {
+            Socket(inetAddress, SYNC_PORT)
         }
-        val intent = VpnService.prepare(this)
-        if (intent != null) {
-            startActivityForResult(intent, VPN_REQUEST_CODE)
+        var bytesRead: Int = -1
+        val response = ByteArray(1024)
+        val gson = Gson()
+
+        withContext(Dispatchers.IO) {
+            val outStream = socket.getOutputStream()
+            outStream.write(byteArrayOf(TYPE_REQUEST_DATA))
+            outStream.flush()
+
+            val inStream = socket.getInputStream()
+            bytesRead = inStream.read(response)
+            socket.close()
+        }
+        val responseString = if (bytesRead != -1) String(response, 0, bytesRead) else ""
+        val type = object : TypeToken<Map<String, String>>() {}.type
+
+        return if (responseString.isNotEmpty()) {
+            gson.fromJson(responseString, type)
         } else {
-            launch {
-                val vpnIntent = Intent(this@MainActivity, HONVpnService::class.java)
-                vpnIntent.putExtra("CONFIG", config)
-                vpnIntent.putExtra("PRIMARY_CHANNEL", primaryChannel)
-                vpnIntent.putExtra("APP_PACKAGE_NAME", appPackageName)
-                startService(vpnIntent)
-            }
+            emptyMap()
         }
     }
 
-    // 关闭
-    private fun stopVpn() {
+
+
+// 启动！
+private fun startVpn(
+    config: HONConfig, primaryChannel: String, appPackageName: String?
+) {
+    if (config.dataNum <= 0) {
+        config.dataNum = 1
+    }
+    val intent = VpnService.prepare(this)
+    if (intent != null) {
+        startActivityForResult(intent, VPN_REQUEST_CODE)
+    } else {
         launch {
-            val intent = Intent(this@MainActivity, HONVpnService::class.java)
-            intent.action = HONVpnService.ACTION_STOP_VPN
-            startService(intent)
+            val vpnIntent = Intent(this@MainActivity, HONVpnService::class.java)
+            vpnIntent.putExtra("CONFIG", config)
+            vpnIntent.putExtra("PRIMARY_CHANNEL", primaryChannel)
+            vpnIntent.putExtra("APP_PACKAGE_NAME", appPackageName)
+            startService(vpnIntent)
         }
     }
+}
+
+// 关闭
+private fun stopVpn() {
+    launch {
+        val intent = Intent(this@MainActivity, HONVpnService::class.java)
+        intent.action = HONVpnService.ACTION_STOP_VPN
+        startService(intent)
+    }
+}
 }
 
