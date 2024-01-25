@@ -48,10 +48,10 @@ class HONVpnService() : VpnService(), CoroutineScope by CoroutineScope(Dispatche
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when {
             intent?.action == ACTION_STOP_VPN && alive -> stopVpn()
-            intent?.action == ACTION_REQUEST_DATA-> sendData()
+            intent?.action == ACTION_REQUEST_DATA -> sendData()
             else -> startVpn(intent)
         }
-        Log.d(TAG, "alive=$alive")
+//        Log.d(TAG, "alive=$alive")
         return START_NOT_STICKY
     }
 
@@ -74,6 +74,7 @@ class HONVpnService() : VpnService(), CoroutineScope by CoroutineScope(Dispatche
             val config: HONConfig? = intent.getParcelableExtra("CONFIG")
             val primaryChannel: String = intent.getStringExtra("PRIMARY_CHANNEL")!!
             val appPackageName: String? = intent.getStringExtra("APP_PACKAGE_NAME")
+            Log.d(TAG, "select APP: $appPackageName")
 
             setupVpn(appPackageName)
             honFecService?.config = config
@@ -144,7 +145,6 @@ class HONVpnService() : VpnService(), CoroutineScope by CoroutineScope(Dispatche
             }
             Log.d(TAG, "REQUEST ${packet.header!!.protocol}: $packet")
             honFecService!!.outputChannel.send(packet)
-            Log.d(TAG, "Sent to HONFecService")
         }
     }
 

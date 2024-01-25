@@ -139,6 +139,7 @@ class HONFecService(
         Log.i(TAG, "Stop service")
     }
 
+    // 获取一些统计结果
     fun getInfo(): MutableMap<String, Any> {
         val res = mutableMapOf<String, Any>()
         res["rxTime"] = rxTime / rxCount
@@ -151,6 +152,18 @@ class HONFecService(
         return res
     }
 
+    private external fun fecInit()
+
+    private external fun encode(
+        dataNum: Int, blockNum: Int, packetBuffers: Array<ByteArray>, blockSize: Int
+    ): Array<ByteArray>
+
+    private external fun decode(
+        dataNum: Int, blockNum: Int, encodeData: Array<ByteArray?>, blockSize: Int
+    ): Array<ByteArray>
+
+
+    // 配置蜂窝和Wifi的Channel
     private suspend fun setupFec(inetAddress: InetAddress, port: Int): Boolean {
 //        defaultUdpChannel = withContext(Dispatchers.IO) {
 //            DatagramChannel.open().apply {
@@ -185,9 +198,9 @@ class HONFecService(
                         network.bindSocket(cellularUdpChannel!!.socket())
                         cellularUdpChannel!!.connect(InetSocketAddress(inetAddress, port))
                         isCellularAvailable.set(true)
-                        Log.d(TAG, "Cellular Channel has established.")
+//                        Log.d(TAG, "Cellular Channel has established.")
                     } catch (e: IOException) {
-                        Log.e(TAG, "Cellular Channel error!!!", e)
+//                        Log.e(TAG, "Cellular Channel error!!!", e)
                     }
                 }
 
@@ -203,13 +216,12 @@ class HONFecService(
                         network.bindSocket(wifiUdpChannel!!.socket())
                         wifiUdpChannel!!.connect(InetSocketAddress(inetAddress, port))
                         isWifiAvailable.set(true)
-                        Log.d(TAG, "WiFi Channel has established.")
+//                        Log.d(TAG, "WiFi Channel has established.")
                     } catch (e: IOException) {
-                        Log.e(TAG, "WiFi Channel error!!!", e)
+//                        Log.e(TAG, "WiFi Channel error!!!", e)
                     }
                 }
             })
-        Log.d("TAG", "setupFec, requestWifi")
 
 //        try {
 //            Log.d(TAG, "Set up $inetAddress, $port")
@@ -231,16 +243,7 @@ class HONFecService(
         return true
     }
 
-    private external fun fecInit()
-
-    private external fun encode(
-        dataNum: Int, blockNum: Int, packetBuffers: Array<ByteArray>, blockSize: Int
-    ): Array<ByteArray>
-
-    private external fun decode(
-        dataNum: Int, blockNum: Int, encodeData: Array<ByteArray?>, blockSize: Int
-    ): Array<ByteArray>
-
+    // 客户端->服务端
     private suspend fun outputLoop() = coroutineScope {
         val blockNum = config!!.dataNum + config!!.parityNum
         var packetBuffers: Array<ByteArray> = Array(config!!.dataNum) { ByteArray(0) }
@@ -250,20 +253,15 @@ class HONFecService(
 
         loop@ while (true) {
             val packet = outputChannel.receive()
-            Log.d(TAG, "output try lock outputMUTEX")
             outputMutex.lock()
-            Log.d(TAG, "output locked outputMUTEX")
 
-            Log.d(
-                TAG,
-                "primaryChannel=$primaryChannel, ${isCellularAvailable.get()}, ${primaryChannel == "Cellular"}"
-            )
+            // 主路选择
             val dataChannel =
                 if ((primaryChannel == "Cellular" && isCellularAvailable.get()) || !isWifiAvailable.get()) {
-                    Log.d(TAG, "dataChannel is Cellular")
+//                    Log.d(TAG, "dataChannel is Cellular")
                     cellularUdpChannel
                 } else {
-                    Log.d(TAG, "dataChannel is Wifi")
+//                    Log.d(TAG, "dataChannel is Wifi")
                     wifiUdpChannel
                 }
 
@@ -285,17 +283,19 @@ class HONFecService(
 //            outputMutex.unlock()
 //            continue@loop
 
+            // 更新group下的index
             index += 1
 
+            // 放进去
             packetBuffers[index] = packet.rawData!!
 
+            // 如果index被更新成了0，那就是新的group
             if (index == 0) {
                 groupId = getGroupId()
             }
-            Log.d(TAG, "output index=$index")
 
 
-
+            // 发送该数据包
             outputSend(
                 groupId,
                 index,
@@ -303,9 +303,22 @@ class HONFecService(
                 dataChannel
             )
 
-            Log.d(TAG, "output start encode things.")
+            // 如果是多倍发包的模式，则再发一个数据包
+            if (config!!.mode == 1) {
+                val parityChannel =
+                    if (isWifiAvailable.get() && primaryChannel == "Cellular" || !isCellularAvailable.get()) {
+//                        Log.d(TAG, "parityChannel is Wifi")
+                        wifiUdpChannel
+                    } else {
+//                        Log.d(TAG, "parityChannel is Cellular")
+                        cellularUdpChannel
+                    }
+                outputSend(groupId, index + config!!.dataNum, packet.rawData!!, parityChannel)
+            }
+
+            // 如果累计了dataNum个数据包，就进行这一个group数据包的冗余包构建
             if (index + 1 == config!!.dataNum) {
-                if (config!!.parityNum > 0) {
+                if (config!!.mode == 0 && config!!.parityNum > 0) {
                     val blockSize = packetBuffers.maxOf { it.size }
                     for (i in packetBuffers.indices) {
                         val currentSize = packetBuffers[i].size
@@ -330,25 +343,15 @@ class HONFecService(
                     }
                     encMax = max(encMax, timeDelta.toDouble())
                     encMin = min(encMin, timeDelta.toDouble())
-                    Log.d(
-                        TAG,
-                        "encode timeDelta=$timeDelta, encTime=$encTime, encMin=$encMin, encMax=$encMax"
-                    )
 
                     val parityChannel =
                         if (isWifiAvailable.get() && primaryChannel == "Cellular" || !isCellularAvailable.get()) {
-                            Log.d(TAG, "parityChannel is Wifi")
+//                            Log.d(TAG, "parityChannel is Wifi")
                             wifiUdpChannel
                         } else {
-                            Log.d(TAG, "parityChannel is Cellular")
+//                            Log.d(TAG, "parityChannel is Cellular")
                             cellularUdpChannel
                         }
-
-//                    val parityChannel = if (isWifiAvailable.get()) {
-//                        wifiUdpChannel
-//                    } else {
-//                        cellularUdpChannel
-//                    }
 
                     for (parityIndex in 0 until config!!.parityNum) {
                         outputSend(
@@ -362,13 +365,11 @@ class HONFecService(
                 packetBuffers = Array(blockNum) { ByteArray(0) }
                 index = -1
             }
-
-            Log.d(TAG, "output start encode things done.")
             outputMutex.unlock()
         }
     }
 
-
+    // 服务端->客户端
     private suspend fun inputLoop() = coroutineScope {
         loop@ while (alive) {
             val n = withContext(Dispatchers.IO) {
@@ -411,7 +412,7 @@ class HONFecService(
         }
     }
 
-
+    // 更新groupId
     private suspend fun getGroupId(): UInt {
         txMutex.lock()
         val groupId = txID
@@ -430,12 +431,13 @@ class HONFecService(
         if (udpChannel == null) {
             return
         }
+        Log.d(TAG,"outputSend: groupId=$groupID, index=$index")
 //        if (index == config!!.dataNum - 1) {
 //            Log.d(TAG, "outputSend dropout")
 //            return
 //        }
         if ((1..100).random() <= config!!.dropRate) {
-            Log.d(TAG, "outputSend dropout")
+//            Log.d(TAG, "outputSend dropout")
             return
         }
 
@@ -446,16 +448,15 @@ class HONFecService(
         buffer.putInt(index)
         buffer.putLong(packetSendTime)
         buffer.put(block)
-
-
         buffer.flip()
+
         if (udpChannel.isConnected) {
             withContext(Dispatchers.IO) {
                 try {
-                    Log.d(
-                        TAG,
-                        "sendBlock: groupId=$groupID, index=$index, block=$block, size=${buffer.remaining()}"
-                    )
+//                    Log.d(
+//                        TAG,
+//                        "sendBlock: groupId=$groupID, index=$index, block=$block, size=${buffer.remaining()}"
+//                    )
                     udpChannel.write(buffer)
                 } catch (e: PortUnreachableException) {
                     Log.e("Error", "PortUnreachableException")
@@ -464,10 +465,7 @@ class HONFecService(
                 }
             }
         }
-
         buffer.flip()
-
-
     }
 
     private suspend fun serveInput(inputBuf: ByteBuffer, channelType: String) = coroutineScope {
@@ -512,7 +510,7 @@ class HONFecService(
                 val channelType = inputPair.first
                 val inputBuf = inputPair.second
 
-                val index = inputBuf.int
+                var index = inputBuf.int
                 val packetSendTime = inputBuf.long
 
                 if (index >= config!!.dataNum + config!!.parityNum) {
@@ -521,9 +519,10 @@ class HONFecService(
 //                if(index==config!!.dataNum-1){
 //                    continue
 //                }
+                Log.d(TAG, "input: groupId=$groupId, index=$index, length=${inputBuf.remaining()}")
                 val randomNum = (1..100).random()
                 if (randomNum <= (config!!.dropRate)) {
-                    Log.d(TAG, "handleDecode: groupId=$groupId, index=$index dropout $randomNum")
+//                    Log.d(TAG, "handleDecode: groupId=$groupId, index=$index dropout $randomNum")
                     continue
                 }
 
@@ -534,6 +533,12 @@ class HONFecService(
                     cellularDelay = packetReceiveTime - packetSendTime
                 }
 
+                // 如果是多倍发包，那么该冗余包的index直接转成对应的数据包index
+                if (index>=config!!.dataNum && config!!.mode == 1){
+                    index -= config!!.dataNum
+                }
+
+                // 如果该index的包已经接受过，就跳过（目前版本应该不会触发）
                 if (marks[index] == 0) {
                     continue
                 }
@@ -541,12 +546,12 @@ class HONFecService(
                 receiveNum += 1
                 marks[index] = 0
 
-                Log.d(
-                    TAG,
-                    "handleDecode: groupId=$groupId, index=$index, receiveNum=$receiveNum, packetSendTime=$packetSendTime"
-                )
+//                Log.d(
+//                    TAG,
+//                    "handleDecode: groupId=$groupId, index=$index, receiveNum=$receiveNum, packetSendTime=$packetSendTime"
+//                )
 
-
+                // 如果是数据包，直接发给接收队列
                 if (index < config!!.dataNum) {
                     val duplicateBuf = inputBuf.duplicate()
                     val packet = IpV4Packet(duplicateBuf)
@@ -557,10 +562,11 @@ class HONFecService(
                     rxMutex.unlock()
                 }
 
-
+                // 把包的内容复制到dataBlocks里面
                 dataBlocks[index] = ByteArray(inputBuf.remaining())
                 inputBuf.get(dataBlocks[index]!!)
 
+                // 如果可以解码就解码
                 if (receiveNum == config!!.dataNum) {
                     val blockSize = dataBlocks.filterNotNull().maxOf { it.size }
                     for (i in dataBlocks.indices) {
@@ -579,6 +585,7 @@ class HONFecService(
 
                     val beforeDec = System.nanoTime()
 
+                    // 解码！！！
                     val decodeBlocks =
                         decode(config!!.dataNum, blockNum, dataBlocks, blockSize)
 
@@ -591,12 +598,12 @@ class HONFecService(
                     }
                     decMax = max(decMax, timeDelta.toDouble())
                     decMin = min(decMin, timeDelta.toDouble())
-                    Log.d(
-                        TAG,
-                        "decode timeDelta=$timeDelta, decTime=$decTime, decMin=$decMin, decMax=$decMax"
-                    )
+//                    Log.d(
+//                        TAG,
+//                        "decode timeDelta=$timeDelta, decTime=$decTime, decMin=$decMin, decMax=$decMax"
+//                    )
 
-
+                    // 解码后把没接收到的包发给接收队列
                     rxMutex.lock()
                     for (i in 0 until config!!.dataNum) {
                         if (marks[i] == 1) {
@@ -604,7 +611,7 @@ class HONFecService(
                             blockBuf.put(decodeBlocks[i])
                             blockBuf.flip()
                             val packet = IpV4Packet(blockBuf)
-                            Log.d(TAG, "decode groupId=$groupId, index=$i, packet=$packet")
+//                            Log.d(TAG, "decode groupId=$groupId, index=$i, packet=$packet")
                             marks[i] = 0
                             rxInsert(packet, groupId, i)
                             rxSend()
@@ -617,16 +624,18 @@ class HONFecService(
         }
     }
 
+    // 把包放进接收队列
     private suspend fun rxInsert(packet: IpV4Packet, groupID: UInt, index: Int) = coroutineScope {
         val rxNew: Triple<IpV4Packet, Pair<UInt, Int>, Long> =
             Triple(packet, Pair(groupID, index), System.nanoTime())
 
 //        Log.d(TAG, " rxInsert: rxGroupId=$rxGroupId, rxIndex=$rxIndex, groupId=$groupID, index=$index, rxNew time=${rxNew.third}")
+        // 如果这个包不是我们期待的包（我们已经忽略了）就直接跳过
         if (rxGroupId > groupID || (rxGroupId == groupID && rxIndex > index)) {
             return@coroutineScope
         }
 
-
+        // 按照顺序插到队列里面
         val rxIter = rxList.listIterator()
         while (rxIter.hasNext()) {
             val rx = rxIter.next()
@@ -638,9 +647,10 @@ class HONFecService(
         }
         rxNum += 1
         rxIter.add(rxNew)
-        rxPrint()
+//        rxPrint()
     }
 
+    // 接收队列里面的包发给手机
     private suspend fun rxSend() = coroutineScope {
         while ((rxList.isNotEmpty())) {
             val now = System.nanoTime()
@@ -665,7 +675,7 @@ class HONFecService(
             }
             rxMax = max(rxMax, timeDelta.toDouble())
             rxMin = min(rxMin, timeDelta.toDouble())
-            rxTotal =(rxPair.first.toInt() * config!!.dataNum + rxPair.second + 1)
+            rxTotal = (rxPair.first.toInt() * config!!.dataNum + rxPair.second + 1)
             rxRate = rxCount.toDouble() / rxTotal.toDouble();
 
             inputChannel.send(rx.first)
@@ -681,6 +691,7 @@ class HONFecService(
         }
     }
 
+    // 打印接收队列里面的信息
     private suspend fun rxPrint() = coroutineScope {
         if (rxList.isNotEmpty()) {
             var rxLog = ""
@@ -693,16 +704,17 @@ class HONFecService(
         }
     }
 
+    // 监听接收队列，如果队首的包规定时间内还在队列内，那就直接发给手机
     private suspend fun monitorRxTimeout() = coroutineScope {
         while (true) {
             delay(1)
             rxMutex.lock()
             val now = System.nanoTime()
             if (rxList.isNotEmpty() && now - rxList.first.third > config!!.rxTimeout * 1000) {
-                Log.d(
-                    TAG,
-                    "delta = ${now - rxList.first.third}, thread = ${config!!.rxTimeout * 1000}"
-                )
+//                Log.d(
+//                    TAG,
+//                    "delta = ${now - rxList.first.third}, thread = ${config!!.rxTimeout * 1000}"
+//                )
                 rxSend()
             }
             rxMutex.unlock()

@@ -12,6 +12,7 @@ data class HONConfig(
     var decodeTimeout: Long,
     var rxTimeout: Long,
     var primaryProbability: Int,
+    var mode: Int,
     var ipAddress: String?,
     var port: String?,
 ) : Parcelable {
@@ -24,8 +25,9 @@ data class HONConfig(
         parcel.readLong(),
         parcel.readLong(),
         parcel.readInt(),
+        parcel.readInt(),
         parcel.readString(),
-        parcel.readString()
+        parcel.readString(),
     )
 
     override fun writeToParcel(parcel: Parcel, flags: Int) {
@@ -37,6 +39,7 @@ data class HONConfig(
         parcel.writeLong(decodeTimeout)
         parcel.writeLong(rxTimeout)
         parcel.writeInt(primaryProbability)
+        parcel.writeInt(mode)
         parcel.writeString(ipAddress)
         parcel.writeString(port)
     }
@@ -63,8 +66,9 @@ data class HONConfig(
                 "rxNum=$rxNum," +
                 "encodeTimeout=$encodeTimeout," +
                 "decodeTimeout=$decodeTimeout," +
-                "rxTimeout=$rxTimeout" +
-                "primaryProbability=$primaryProbability" +
+                "rxTimeout=$rxTimeout," +
+                "primaryProbability=$primaryProbability," +
+                "mode=$mode," +
                 "ipAddress='$ipAddress'," +
                 "port='$port'," +
                 "}"
@@ -81,8 +85,9 @@ data class HONConfig(
                 "decodeTimeout": $decodeTimeout,
                 "rxTimeout": $rxTimeout,
                 "primaryProbability": $primaryProbability,
+                "mode": $mode,
                 "ipAddress": "$ipAddress",
-                "port": "$port"
+                "port": "$port",
             }
         """.trimIndent()
     }

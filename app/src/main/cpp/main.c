@@ -130,7 +130,7 @@ Java_com_example_honapp_HONFecService_decode(JNIEnv *env, jobject thiz, jint dat
         }
     }
 
-    log_data((unsigned char **) (char **) data_blocks, "Before Decode", block_num, block_size);
+//    log_data((unsigned char **) (char **) data_blocks, "Before Decode", block_num, block_size);
 
     if (block_num > data_num) {
         reed_solomon *rs = reed_solomon_new(data_num, block_num - data_num);
@@ -138,7 +138,7 @@ Java_com_example_honapp_HONFecService_decode(JNIEnv *env, jobject thiz, jint dat
                                  block_size);
     }
 
-    log_data((unsigned char **) (char **) data_blocks, "After Decode", block_num, block_size);
+//    log_data((unsigned char **) (char **) data_blocks, "After Decode", block_num, block_size);
 
     jclass cls = (*env)->FindClass(env, "[B");
     jobjectArray res_data = (*env)->NewObjectArray(env, data_num, cls, NULL);

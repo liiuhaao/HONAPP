@@ -100,10 +100,14 @@ class MainActivity : ComponentActivity(), CoroutineScope by MainScope() {
                     rxTimeout = 100000,
                     primaryProbability = 80,
                     ipAddress = "106.75.241.183",
-                    port = "54345"
+                    port = "54345",
+                    mode = 0,
                 )
             )
         }
+
+        // 模式选项
+        val modeOptions = listOf("补零冗余", "多倍发包")
 
         // ip地址选取
         val ipAddresses = listOf("106.75.241.183", "106.75.227.194", "202.120.87.33")
@@ -116,7 +120,7 @@ class MainActivity : ComponentActivity(), CoroutineScope by MainScope() {
         val syncResult = remember { mutableStateOf("") }
 
         // 时延测试的配置
-        var serverAddress by remember { mutableStateOf("106.75.227.194") }
+        var serverAddress by remember { mutableStateOf("113.31.163.195") }
         var serverPort by remember { mutableStateOf("33333") }
         var packetSize by remember { mutableStateOf(1024) }
         var numTests by remember { mutableStateOf(100) }
@@ -214,6 +218,7 @@ class MainActivity : ComponentActivity(), CoroutineScope by MainScope() {
                     }
 
                     Column(modifier = Modifier.padding(20.dp)) {
+                        // VPN IP地址和端口短输入
                         Row(Modifier.fillMaxWidth()) {
                             OutlinedTextField(value = config.ipAddress!!,
                                 onValueChange = { newValue ->
@@ -260,6 +265,7 @@ class MainActivity : ComponentActivity(), CoroutineScope by MainScope() {
                             )
                         }
 
+                        // FEC 数据包和冗余包配置
                         Row {
                             OutlinedTextField(
                                 value = config.dataNum.toString(),
@@ -311,6 +317,8 @@ class MainActivity : ComponentActivity(), CoroutineScope by MainScope() {
 
                         }
                         Spacer(modifier = Modifier.height(10.dp))
+
+                        // 编解码和保序时间上限
                         Row {
                             OutlinedTextField(
                                 value = config.encodeTimeout.toString(),
@@ -360,6 +368,8 @@ class MainActivity : ComponentActivity(), CoroutineScope by MainScope() {
                                 singleLine = true,
                             )
                         }
+
+                        // 保守发包率（暂时没用）和模拟丢包率
                         Row {
                             OutlinedTextField(
                                 value = config.primaryProbability.toString(),
@@ -393,7 +403,42 @@ class MainActivity : ComponentActivity(), CoroutineScope by MainScope() {
                                 singleLine = true,
                             )
                         }
+
                         Spacer(modifier = Modifier.height(20.dp))
+
+                        // 模式选择
+                        Row(
+                            Modifier
+                                .fillMaxWidth()
+                                .padding(bottom = 16.dp)
+                        ) {
+                            Text("模式选择：", modifier = Modifier.align(Alignment.CenterVertically))
+                            Spacer(modifier = Modifier.width(10.dp))
+
+                            var expanded by remember { mutableStateOf(false) }
+                            Text(modeOptions[config.mode], modifier = Modifier
+                                .clickable { expanded = true }
+                                .align(Alignment.CenterVertically)
+                                .padding(start = 8.dp))
+
+                            DropdownMenu(
+                                expanded = expanded,
+                                onDismissRequest = { expanded = false }
+                            ) {
+                                modeOptions.forEachIndexed { index, option ->
+                                    DropdownMenuItem(onClick = {
+                                        config = config.copy(mode = index)
+                                        expanded = false
+                                    }) {
+                                        Text(option)
+                                    }
+                                }
+                            }
+                        }
+
+                        Spacer(modifier = Modifier.height(20.dp))
+
+                        // 主路选择
                         Row(
                             Modifier
                                 .fillMaxWidth()
@@ -414,6 +459,8 @@ class MainActivity : ComponentActivity(), CoroutineScope by MainScope() {
                         }
 
                         Spacer(modifier = Modifier.height(20.dp))
+
+                        // VPN 开始和结束按钮
                         Row(
                             modifier = Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.Center,
@@ -436,8 +483,9 @@ class MainActivity : ComponentActivity(), CoroutineScope by MainScope() {
                             }
                         }
 
-
                         Spacer(modifier = Modifier.height(20.dp))
+
+                        // 选择哪个应用的包被VPN拦截
                         Row(
                             modifier = Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.Center,
@@ -458,7 +506,7 @@ class MainActivity : ComponentActivity(), CoroutineScope by MainScope() {
                             }
                         }
 
-
+                        // 展示被VPN拦截的应用
                         selectedApp?.let { app ->
                             Row(
                                 verticalAlignment = Alignment.CenterVertically,
@@ -479,6 +527,7 @@ class MainActivity : ComponentActivity(), CoroutineScope by MainScope() {
 
                     }
                 }
+
                 // 测试页面
                 composable("测试") {
                     Column(modifier = Modifier.padding(20.dp)) {
@@ -564,7 +613,7 @@ class MainActivity : ComponentActivity(), CoroutineScope by MainScope() {
                                         for (thread in 0 until numThreads) {
                                             launch {
                                                 for (i in 0 until numTests) {
-                                                    Log.d(TAG, "test thread=$thread, i=$i")
+//                                                    Log.d(TAG, "test thread=$thread, i=$i")
                                                     val latencyResults = testTcpLatency(
                                                         serverAddress,
                                                         serverPort.toInt(),
@@ -785,6 +834,8 @@ class MainActivity : ComponentActivity(), CoroutineScope by MainScope() {
         val socket = withContext(Dispatchers.IO) {
             Socket(inetAddress, SYNC_PORT)
         }
+
+        Log.d(TAG,"HONConfig=${config}")
         val jsonConfig = config.toJson()
         var bytesRead: Int = -1
         val response = ByteArray(1024)
@@ -811,6 +862,7 @@ class MainActivity : ComponentActivity(), CoroutineScope by MainScope() {
         }
     }
 
+    // 获取服务器的统计信息
     private suspend fun requestDataFromServer(
         config: HONConfig,
     ): Map<String, String> {
@@ -843,35 +895,34 @@ class MainActivity : ComponentActivity(), CoroutineScope by MainScope() {
     }
 
 
-
-// 启动！
-private fun startVpn(
-    config: HONConfig, primaryChannel: String, appPackageName: String?
-) {
-    if (config.dataNum <= 0) {
-        config.dataNum = 1
-    }
-    val intent = VpnService.prepare(this)
-    if (intent != null) {
-        startActivityForResult(intent, VPN_REQUEST_CODE)
-    } else {
-        launch {
-            val vpnIntent = Intent(this@MainActivity, HONVpnService::class.java)
-            vpnIntent.putExtra("CONFIG", config)
-            vpnIntent.putExtra("PRIMARY_CHANNEL", primaryChannel)
-            vpnIntent.putExtra("APP_PACKAGE_NAME", appPackageName)
-            startService(vpnIntent)
+    // 启动！
+    private fun startVpn(
+        config: HONConfig, primaryChannel: String, appPackageName: String?
+    ) {
+        if (config.dataNum <= 0) {
+            config.dataNum = 1
+        }
+        val intent = VpnService.prepare(this)
+        if (intent != null) {
+            startActivityForResult(intent, VPN_REQUEST_CODE)
+        } else {
+            launch {
+                val vpnIntent = Intent(this@MainActivity, HONVpnService::class.java)
+                vpnIntent.putExtra("CONFIG", config)
+                vpnIntent.putExtra("PRIMARY_CHANNEL", primaryChannel)
+                vpnIntent.putExtra("APP_PACKAGE_NAME", appPackageName)
+                startService(vpnIntent)
+            }
         }
     }
-}
 
-// 关闭
-private fun stopVpn() {
-    launch {
-        val intent = Intent(this@MainActivity, HONVpnService::class.java)
-        intent.action = HONVpnService.ACTION_STOP_VPN
-        startService(intent)
+    // 关闭
+    private fun stopVpn() {
+        launch {
+            val intent = Intent(this@MainActivity, HONVpnService::class.java)
+            intent.action = HONVpnService.ACTION_STOP_VPN
+            startService(intent)
+        }
     }
-}
 }
 
