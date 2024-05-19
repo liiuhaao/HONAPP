@@ -11,6 +11,7 @@ import android.graphics.Canvas
 import android.graphics.drawable.AdaptiveIconDrawable
 import android.graphics.drawable.BitmapDrawable
 import android.net.VpnService
+import android.os.BatteryManager
 import android.os.Build
 import android.os.Bundle
 import android.util.Log
@@ -39,7 +40,6 @@ import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
-import androidx.core.app.ActivityCompat.startActivityForResult
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
@@ -51,6 +51,9 @@ import kotlinx.coroutines.*
 import java.io.DataInputStream
 import java.io.DataOutputStream
 import java.net.Socket
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
 class MainActivity : ComponentActivity(), CoroutineScope by MainScope() {
 
@@ -91,9 +94,9 @@ class MainActivity : ComponentActivity(), CoroutineScope by MainScope() {
         var config by remember {
             mutableStateOf(
                 HONConfig(
-                    dropRate = 0,
-                    dataNum = 5,
-                    parityNum = 0,
+                    dropRate = 10,
+                    dataNum = 8,
+                    parityNum = 4,
                     rxNum = 100,
                     encodeTimeout = 1000000,
                     decodeTimeout = 1000000,
@@ -107,14 +110,14 @@ class MainActivity : ComponentActivity(), CoroutineScope by MainScope() {
         }
 
         // 模式选项
-        val modeOptions = listOf("补零冗余", "多倍发包")
+        val modeOptions = listOf("自研FEC", "开源RS", "多倍发包")
 
         // ip地址选取
         val ipAddresses = listOf("106.75.241.183", "106.75.227.194", "202.120.87.33")
         var menuExpanded by remember { mutableStateOf(false) }
 
         // 选择那一条路是主路
-        val primaryChannel = remember { mutableStateOf("Cellular") }
+        val primaryChannel = remember { mutableStateOf("Wifi") }
 
         // 显示同步状态
         val syncResult = remember { mutableStateOf("") }
@@ -127,13 +130,26 @@ class MainActivity : ComponentActivity(), CoroutineScope by MainScope() {
         var numThreads by remember { mutableStateOf(10) }
 
         // 时延测试的输出
-        var showResult by remember { mutableStateOf(false) }
+        var showLatencyResult by remember { mutableStateOf(false) }
         var averageLatency by remember { mutableStateOf(0L) }
         var latencyList by remember { mutableStateOf<List<Long>?>(null) }
         var testJob: Job? = null
 
         val serverData = remember { mutableStateOf<Map<String, String>?>(null) }
         val clientData = remember { mutableStateOf<Map<String, String>?>(null) }
+
+        val batteryManager = getSystemService(Context.BATTERY_SERVICE) as BatteryManager
+        var latencyEnergyBefore =
+            batteryManager.getLongProperty(BatteryManager.BATTERY_PROPERTY_CHARGE_COUNTER)
+
+        var showEnergyResult by remember { mutableStateOf(false) }
+        var energyStartTime by remember { mutableStateOf(0L) }
+        var energyBefore =
+            batteryManager.getLongProperty(BatteryManager.BATTERY_PROPERTY_CHARGE_COUNTER)
+        var energyConsumed by remember { mutableStateOf(0L) }
+        var startTimeFormatted by remember { mutableStateOf("") }
+        val timeFormatter = SimpleDateFormat("HH:mm:ss", Locale.getDefault())
+        var powerConsumption by remember { mutableStateOf(0.0) }
 
         // 好像是用来监听vpnIntent的广播，用来接收数据的，gpt写的
         val context = LocalContext.current
@@ -428,6 +444,9 @@ class MainActivity : ComponentActivity(), CoroutineScope by MainScope() {
                                 modeOptions.forEachIndexed { index, option ->
                                     DropdownMenuItem(onClick = {
                                         config = config.copy(mode = index)
+                                        if (index == 0) {
+                                            config = config.copy(dataNum = 8, parityNum = 4)
+                                        }
                                         expanded = false
                                     }) {
                                         Text(option)
@@ -606,9 +625,11 @@ class MainActivity : ComponentActivity(), CoroutineScope by MainScope() {
                         ) {
                             Button(
                                 onClick = {
-                                    showResult = true
+                                    showLatencyResult = true
                                     averageLatency = 0
                                     latencyList = mutableListOf()
+                                    latencyEnergyBefore =
+                                        batteryManager.getLongProperty(BatteryManager.BATTERY_PROPERTY_CHARGE_COUNTER)
                                     testJob = CoroutineScope(Dispatchers.IO).launch {
                                         for (thread in 0 until numThreads) {
                                             launch {
@@ -630,14 +651,14 @@ class MainActivity : ComponentActivity(), CoroutineScope by MainScope() {
                                     }
                                 },
                             ) {
-                                Text("开始测试")
+                                Text("时延测试")
                             }
                             Spacer(modifier = Modifier.width(20.dp))
                             Button(onClick = { testJob?.cancel() }) {
                                 Text("结束测试")
                             }
                             Spacer(modifier = Modifier.width(20.dp))
-                            Button(onClick = { showResult = false }) {
+                            Button(onClick = { showLatencyResult = false }) {
                                 Text("清空结果")
                             }
                         }
@@ -649,7 +670,7 @@ class MainActivity : ComponentActivity(), CoroutineScope by MainScope() {
                         ) {
                             Button(onClick = {
                                 launch {
-                                    showResult = true
+                                    showLatencyResult = true
                                     val intent =
                                         Intent(this@MainActivity, HONVpnService::class.java)
                                     intent.action = HONVpnService.ACTION_REQUEST_DATA
@@ -668,7 +689,7 @@ class MainActivity : ComponentActivity(), CoroutineScope by MainScope() {
                             Button(onClick = {
                                 launch {
                                     stopVpn()
-                                    showResult = true
+                                    showLatencyResult = true
                                     serverData.value = requestDataFromServer(config)
                                 }
                             }) {
@@ -676,13 +697,71 @@ class MainActivity : ComponentActivity(), CoroutineScope by MainScope() {
                             }
                         }
                         Spacer(modifier = Modifier.height(16.dp))
-                        if (showResult) {
+
+                        Spacer(modifier = Modifier.height(20.dp))
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.Center,
+                        ) {
+                            Button(
+                                onClick = {
+                                    showEnergyResult = true
+                                    energyStartTime = System.currentTimeMillis()
+                                    startTimeFormatted = timeFormatter.format(Date(energyStartTime))
+                                    energyBefore =
+                                        batteryManager.getLongProperty(BatteryManager.BATTERY_PROPERTY_CHARGE_COUNTER)
+                                    energyConsumed =
+                                        energyBefore - batteryManager.getLongProperty(BatteryManager.BATTERY_PROPERTY_CHARGE_COUNTER)
+                                    val energyNowTime = System.currentTimeMillis()
+                                    val timeElapsedInHours =
+                                        (energyNowTime - energyStartTime) / (1000.0 * 60 * 60)
+                                    powerConsumption = if (timeElapsedInHours > 0) {
+                                        energyConsumed.toDouble() / timeElapsedInHours
+                                    } else {
+                                        0.0
+                                    }
+
+                                },
+                            ) {
+                                Text("功耗测试")
+                            }
+                            Spacer(modifier = Modifier.width(20.dp))
+                            Button(onClick = {
+                                showEnergyResult = true
+                                energyConsumed =
+                                    energyBefore - batteryManager.getLongProperty(BatteryManager.BATTERY_PROPERTY_CHARGE_COUNTER)
+                                val energyNowTime = System.currentTimeMillis()
+                                val timeElapsedInHours =
+                                    (energyNowTime - energyStartTime) / (1000.0 * 60 * 60)
+                                powerConsumption = if (timeElapsedInHours > 0) {
+                                    energyConsumed.toDouble() / timeElapsedInHours
+                                } else {
+                                    0.0
+                                }
+                            }) {
+                                Text("刷新功耗")
+                            }
+                            Spacer(modifier = Modifier.width(20.dp))
+                            Button(onClick = { showEnergyResult = false }) {
+                                Text("清空结果")
+                            }
+                        }
+
+                        if (showLatencyResult) {
 //                            latencyList?.let { results ->
 //                                Text("平均延迟：${averageLatency}ms\n[${latencyList!!.size}/${numTests * numThreads}]：${results.joinToString()}")
 //                            }
                             Column {
+
                                 if (latencyList != null) {
                                     Text("平均延迟：${averageLatency}ms [${latencyList!!.size}/${numTests * numThreads}]")
+                                    Text(
+                                        "功耗：${
+                                            (latencyEnergyBefore - batteryManager.getLongProperty(
+                                                BatteryManager.BATTERY_PROPERTY_CHARGE_COUNTER
+                                            ))
+                                        } 微安时（μAh）"
+                                    )
                                     Spacer(modifier = Modifier.height(20.dp))
                                 }
                                 clientData.value?.let { dataMap ->
@@ -714,6 +793,15 @@ class MainActivity : ComponentActivity(), CoroutineScope by MainScope() {
                                     Spacer(modifier = Modifier.height(20.dp))
                                 }
                             }
+                        }
+
+                        if (showEnergyResult) {
+                            Text("测试开始时间： $startTimeFormatted")
+                            Text("测试持续时间： ${(System.currentTimeMillis() - energyStartTime) / 1000} 秒")
+
+                            // Display power consumption in microamperes
+                            Text("功耗： ${powerConsumption} µA") // Assuming energyConsumed is in nanoamperes (nA)
+
                         }
                     }
 
@@ -835,7 +923,7 @@ class MainActivity : ComponentActivity(), CoroutineScope by MainScope() {
             Socket(inetAddress, SYNC_PORT)
         }
 
-        Log.d(TAG,"HONConfig=${config}")
+        Log.d(TAG, "HONConfig=${config}")
         val jsonConfig = config.toJson()
         var bytesRead: Int = -1
         val response = ByteArray(1024)

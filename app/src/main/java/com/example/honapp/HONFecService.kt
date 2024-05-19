@@ -155,11 +155,15 @@ class HONFecService(
     private external fun fecInit()
 
     private external fun encode(
-        dataNum: Int, blockNum: Int, packetBuffers: Array<ByteArray>, blockSize: Int
+        dataNum: Int,
+        blockNum: Int,
+        packetBuffers: Array<ByteArray>,
+        blockSize: Int,
+        mode: Int,
     ): Array<ByteArray>
 
     private external fun decode(
-        dataNum: Int, blockNum: Int, encodeData: Array<ByteArray?>, blockSize: Int
+        dataNum: Int, blockNum: Int, encodeData: Array<ByteArray?>, blockSize: Int, mode: Int,
     ): Array<ByteArray>
 
 
@@ -304,7 +308,7 @@ class HONFecService(
             )
 
             // 如果是多倍发包的模式，则再发一个数据包
-            if (config!!.mode == 1) {
+            if (config!!.mode == 2) {
                 val parityChannel =
                     if (isWifiAvailable.get() && primaryChannel == "Cellular" || !isCellularAvailable.get()) {
 //                        Log.d(TAG, "parityChannel is Wifi")
@@ -318,7 +322,7 @@ class HONFecService(
 
             // 如果累计了dataNum个数据包，就进行这一个group数据包的冗余包构建
             if (index + 1 == config!!.dataNum) {
-                if (config!!.mode == 0 && config!!.parityNum > 0) {
+                if ((config!!.mode == 0 || config!!.mode == 1) && config!!.parityNum > 0) {
                     val blockSize = packetBuffers.maxOf { it.size }
                     for (i in packetBuffers.indices) {
                         val currentSize = packetBuffers[i].size
@@ -332,7 +336,8 @@ class HONFecService(
 
                     val beforeEnc = System.nanoTime()
 
-                    val encodedData = encode(config!!.dataNum, blockNum, packetBuffers, blockSize)
+                    val encodedData =
+                        encode(config!!.dataNum, blockNum, packetBuffers, blockSize, config!!.mode)
 
                     val afterEnc = System.nanoTime()
                     val timeDelta = afterEnc - beforeEnc
@@ -431,7 +436,7 @@ class HONFecService(
         if (udpChannel == null) {
             return
         }
-        Log.d(TAG,"outputSend: groupId=$groupID, index=$index")
+        Log.d(TAG, "outputSend: groupId=$groupID, index=$index")
 //        if (index == config!!.dataNum - 1) {
 //            Log.d(TAG, "outputSend dropout")
 //            return
@@ -513,7 +518,10 @@ class HONFecService(
                 var index = inputBuf.int
                 val packetSendTime = inputBuf.long
 
-                if (index >= config!!.dataNum + config!!.parityNum) {
+                if ((config!!.mode == 0 || config!!.mode == 1) && index >= config!!.dataNum + config!!.parityNum) {
+                    continue
+                }
+                if (config!!.mode == 2 && index >= 2 * config!!.dataNum) {
                     continue
                 }
 //                if(index==config!!.dataNum-1){
@@ -534,7 +542,7 @@ class HONFecService(
                 }
 
                 // 如果是多倍发包，那么该冗余包的index直接转成对应的数据包index
-                if (index>=config!!.dataNum && config!!.mode == 1){
+                if (index >= config!!.dataNum && config!!.mode == 2) {
                     index -= config!!.dataNum
                 }
 
@@ -568,7 +576,10 @@ class HONFecService(
 
                 // 如果可以解码就解码
                 if (receiveNum == config!!.dataNum) {
-                    val blockSize = dataBlocks.filterNotNull().maxOf { it.size }
+                    var blockSize = dataBlocks.filterNotNull().maxOf { it.size }
+                    if (config!!.mode == 0) {
+                        blockSize += (4 - blockSize % 4) % 4
+                    }
                     for (i in dataBlocks.indices) {
                         if (dataBlocks[i] != null && dataBlocks[i]!!.size < blockSize) {
                             val newArray = ByteArray(blockSize)
@@ -586,8 +597,9 @@ class HONFecService(
                     val beforeDec = System.nanoTime()
 
                     // 解码！！！
+                    Log.d("main.c", "decode groupId=$groupId, index=$index")
                     val decodeBlocks =
-                        decode(config!!.dataNum, blockNum, dataBlocks, blockSize)
+                        decode(config!!.dataNum, blockNum, dataBlocks, blockSize, config!!.mode)
 
                     val afterDec = System.nanoTime()
                     val timeDelta = afterDec - beforeDec
@@ -647,7 +659,7 @@ class HONFecService(
         }
         rxNum += 1
         rxIter.add(rxNew)
-//        rxPrint()
+        rxPrint()
     }
 
     // 接收队列里面的包发给手机

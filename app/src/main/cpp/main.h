@@ -3,3 +3,4 @@
 //
 
 #include "rs.h"
+#include "fec84.h"

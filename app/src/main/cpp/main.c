@@ -61,15 +61,15 @@ void log_data(unsigned char **data_block, char *tag, int block_num, int block_si
 JNIEXPORT jobjectArray JNICALL
 Java_com_example_honapp_HONFecService_encode(JNIEnv *env, jobject thiz, jint data_num,
                                              jint block_num,
-                                             jobjectArray packet_buffers, jint block_size) {
-
-
+                                             jobjectArray packet_buffers, jint block_size,
+                                             jint mode) {
     jbyte arr[block_num][block_size];
     memset(arr, 0, sizeof(arr));
     unsigned char *data_blocks[block_num];
     for (int i = 0; i < block_num; i++) {
         if (i < data_num) {
-            jbyteArray byteArray = (jbyteArray) (*env)->GetObjectArrayElement(env, packet_buffers,
+            jbyteArray byteArray = (jbyteArray) (*env)->GetObjectArrayElement(env,
+                                                                              packet_buffers,
                                                                               i);
             memcpy(arr[i], (unsigned char *) (*env)->GetByteArrayElements(env, byteArray, NULL),
                    block_size);
@@ -77,43 +77,70 @@ Java_com_example_honapp_HONFecService_encode(JNIEnv *env, jobject thiz, jint dat
         data_blocks[i] = (unsigned char *) arr[i];
     }
 
-//    log_data(data_blocks, "origin", block_num, block_size);
+    if (mode == 0) {
+//        log_data(data_blocks, "origin", block_num, block_size);
 
-    reed_solomon *rs = reed_solomon_new(data_num, block_num - data_num);
-    reed_solomon_encode2(rs, data_blocks, block_num, block_size);
+        jbyte **parity_pacekts = (jbyte **) fec_encode(data_num, block_num - data_num, block_size,
+                                                       data_blocks);
 
-//    log_data(data_blocks, "encode", block_num, block_size);
+//        log_data(parity_pacekts, "encode", block_num - data_num, block_size);
 
-//    unsigned char marks[block_num];
-//    memset(marks,0,sizeof(marks));
-//    for (int i = 0; i < 5; i++) {
-//        marks[i] = 1;
-//        memset(data_blocks[i], 0, block_size);
-//    }
-//
-//    log_data(data_blocks, "receive", block_num, block_size);
-//    reed_solomon *rss = reed_solomon_new(data_num, block_num - data_num);
-//    reed_solomon_reconstruct(rss, data_blocks, marks, block_num,
-//                             block_size);
-//
-//    log_data(data_blocks, "decode", block_num, block_size);
+        jclass cls = (*env)->FindClass(env, "[B");
+        int parity_num = block_num - data_num;
+        jobjectArray res_data = (*env)->NewObjectArray(env, parity_num, cls, NULL);
 
-    jclass cls = (*env)->FindClass(env, "[B");
-    int parity_num = block_num - data_num;
-    jobjectArray res_data = (*env)->NewObjectArray(env, parity_num, cls, NULL);
+        for (int i = 0; i < parity_num; i++) {
+            jbyteArray block = (*env)->NewByteArray(env, block_size);
+            (*env)->SetByteArrayRegion(env, block, 0, block_size,
+                                       (jbyte *) parity_pacekts[i]);
+            (*env)->SetObjectArrayElement(env, res_data, i, block);
+        }
+        return res_data;
 
-    for (int i = 0; i < parity_num; i++) {
-        jbyteArray block = (*env)->NewByteArray(env, block_size);
-        (*env)->SetByteArrayRegion(env, block, 0, block_size, (jbyte *) data_blocks[data_num + i]);
-        (*env)->SetObjectArrayElement(env, res_data, i, block);
+    } else if (mode == 1) {
+
+
+        //    log_data(data_blocks, "origin", block_num, block_size);
+
+        reed_solomon *rs = reed_solomon_new(data_num, block_num - data_num);
+        reed_solomon_encode2(rs, data_blocks, block_num, block_size);
+
+        //    log_data(data_blocks, "encode", block_num, block_size);
+
+        //    unsigned char marks[block_num];
+        //    memset(marks,0,sizeof(marks));
+        //    for (int i = 0; i < 5; i++) {
+        //        marks[i] = 1;
+        //        memset(data_blocks[i], 0, block_size);
+        //    }
+        //
+        //    log_data(data_blocks, "receive", block_num, block_size);
+        //    reed_solomon *rss = reed_solomon_new(data_num, block_num - data_num);
+        //    reed_solomon_reconstruct(rss, data_blocks, marks, block_num,
+        //                             block_size);
+        //
+        //    log_data(data_blocks, "decode", block_num, block_size);
+
+        jclass cls = (*env)->FindClass(env, "[B");
+        int parity_num = block_num - data_num;
+        jobjectArray res_data = (*env)->NewObjectArray(env, parity_num, cls, NULL);
+
+        for (int i = 0; i < parity_num; i++) {
+            jbyteArray block = (*env)->NewByteArray(env, block_size);
+            (*env)->SetByteArrayRegion(env, block, 0, block_size,
+                                       (jbyte *) data_blocks[data_num + i]);
+            (*env)->SetObjectArrayElement(env, res_data, i, block);
+        }
+        return res_data;
     }
-    return res_data;
+    return NULL;
+
 }
 
 JNIEXPORT jobjectArray JNICALL
 Java_com_example_honapp_HONFecService_decode(JNIEnv *env, jobject thiz, jint data_num,
                                              jint block_num, jobjectArray encode_data,
-                                             jint block_size) {
+                                             jint block_size, jint mode) {
     jbyte arr[block_num][block_size];
     unsigned char *data_blocks[block_num];
     unsigned char marks[block_num];
@@ -130,15 +157,22 @@ Java_com_example_honapp_HONFecService_decode(JNIEnv *env, jobject thiz, jint dat
         }
     }
 
-//    log_data((unsigned char **) (char **) data_blocks, "Before Decode", block_num, block_size);
+    log_data((unsigned char **) (char **) data_blocks, "Before Decode", block_num, block_size);
 
     if (block_num > data_num) {
-        reed_solomon *rs = reed_solomon_new(data_num, block_num - data_num);
-        reed_solomon_reconstruct(rs, data_blocks, marks, block_num,
-                                 block_size);
+        if (mode == 0) {
+            LOGD("try to fec_decode.......");
+            fec_decode(data_num, block_num - data_num, block_size, data_blocks,
+                       marks);
+            LOGD("fec_decode done!!!");
+        } else {
+            reed_solomon *rs = reed_solomon_new(data_num, block_num - data_num);
+            reed_solomon_reconstruct(rs, data_blocks, marks, block_num,
+                                     block_size);
+        }
     }
 
-//    log_data((unsigned char **) (char **) data_blocks, "After Decode", block_num, block_size);
+    log_data((unsigned char **) (char **) data_blocks, "After Decode", block_num, block_size);
 
     jclass cls = (*env)->FindClass(env, "[B");
     jobjectArray res_data = (*env)->NewObjectArray(env, data_num, cls, NULL);
@@ -152,5 +186,7 @@ Java_com_example_honapp_HONFecService_decode(JNIEnv *env, jobject thiz, jint dat
 
 JNIEXPORT void JNICALL
 Java_com_example_honapp_HONFecService_fecInit(JNIEnv *env, jobject thiz) {
+    get_gf_table();
     fec_init();
 }
+
