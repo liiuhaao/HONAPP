@@ -73,12 +73,14 @@ class HONVpnService() : VpnService(), CoroutineScope by CoroutineScope(Dispatche
 
             val config: HONConfig? = intent.getParcelableExtra("CONFIG")
             val primaryChannel: String = intent.getStringExtra("PRIMARY_CHANNEL")!!
+            val dropMode: String = intent.getStringExtra("DROP_MODE")!!
             val appPackageName: String? = intent.getStringExtra("APP_PACKAGE_NAME")
             Log.d(TAG, "select APP: $appPackageName")
 
             setupVpn(appPackageName)
             honFecService?.config = config
             honFecService?.primaryChannel = primaryChannel
+            honFecService?.dropMode = dropMode
             honFecService!!.stop()
 
             val ipAddress = config!!.ipAddress

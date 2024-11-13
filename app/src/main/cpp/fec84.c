@@ -1882,16 +1882,13 @@ inverse_sub_matrix(u8 **lost_matrix, u8 **sub_matrix, int lost_packet_num, int p
 
 // 解码。必须保证接受到的包至少data_num个，我这里就不加判断了。
 u8 **fec_decode(int data_num, int parity_num, int packet_len, u8 **packets, u8 *marks) {
-    LOGD("fec_decode data_num=%d, parity_num=%d, packet_len=%d", data_num, parity_num, packet_len);
     // return packets;
     int block_num = 4;
     int block_len = (packet_len + block_num - 1) / block_num;
     Fec *fec = new_fec(data_num, parity_num, block_num, block_len);
 
-    LOGD("fec_decode try to get singular");
     // 获得校验包
     u8 **singular_packets = gf_fun(fec, packets, marks);
-    LOGD("fec_decode get singular done!!!");
 
     // printf("singular_packets:\n");
     // print_packets(4, packet_len, singular_packets);

@@ -14,6 +14,8 @@ import android.net.VpnService
 import android.os.BatteryManager
 import android.os.Build
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.util.Log
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -24,7 +26,9 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.*
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowDropDown
@@ -32,7 +36,6 @@ import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Send
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
-import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.platform.LocalContext
@@ -54,6 +57,16 @@ import java.net.Socket
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import androidx.compose.foundation.Canvas
+import androidx.compose.runtime.Composable
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.Color
+import kotlin.io.path.Path
+import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.nativeCanvas
+
 
 class MainActivity : ComponentActivity(), CoroutineScope by MainScope() {
 
@@ -94,15 +107,16 @@ class MainActivity : ComponentActivity(), CoroutineScope by MainScope() {
         var config by remember {
             mutableStateOf(
                 HONConfig(
-                    dropRate = 10,
+                    dropRate = 0,
                     dataNum = 8,
-                    parityNum = 4,
+                    parityNum = 0,
                     rxNum = 100,
                     encodeTimeout = 1000000,
                     decodeTimeout = 1000000,
                     rxTimeout = 100000,
+                    ackTimeout = 50000,
                     primaryProbability = 80,
-                    ipAddress = "106.75.241.183",
+                    ipAddress = "106.75.223.143",
                     port = "54345",
                     mode = 0,
                 )
@@ -110,23 +124,28 @@ class MainActivity : ComponentActivity(), CoroutineScope by MainScope() {
         }
 
         // 模式选项
-        val modeOptions = listOf("自研FEC", "开源RS", "多倍发包")
+        val modeOptions = listOf("自研FEC", "开源RS", "多倍发包", "重传冗余")
 
         // ip地址选取
-        val ipAddresses = listOf("106.75.241.183", "106.75.227.194", "202.120.87.33")
+        val ipAddresses = listOf("106.75.223.143")
         var menuExpanded by remember { mutableStateOf(false) }
 
         // 选择那一条路是主路
         val primaryChannel = remember { mutableStateOf("Wifi") }
 
+        val dropModeList = listOf("主路随机丢包", "双路随机丢包")
+        var dropMode by remember { mutableStateOf("主路随机丢包") }
+
         // 显示同步状态
         val syncResult = remember { mutableStateOf("") }
 
+        var updateVpnResult by remember { mutableStateOf(false) }
+
         // 时延测试的配置
-        var serverAddress by remember { mutableStateOf("113.31.163.195") }
+        var serverAddress by remember { mutableStateOf("106.75.251.187") }
         var serverPort by remember { mutableStateOf("33333") }
         var packetSize by remember { mutableStateOf(1024) }
-        var numTests by remember { mutableStateOf(100) }
+        var numTests by remember { mutableStateOf(200) }
         var numThreads by remember { mutableStateOf(10) }
 
         // 时延测试的输出
@@ -137,6 +156,7 @@ class MainActivity : ComponentActivity(), CoroutineScope by MainScope() {
 
         val serverData = remember { mutableStateOf<Map<String, String>?>(null) }
         val clientData = remember { mutableStateOf<Map<String, String>?>(null) }
+        val lineData = remember { mutableStateOf<Map<String, List<Float>>?>(null) }
 
         val batteryManager = getSystemService(Context.BATTERY_SERVICE) as BatteryManager
         var latencyEnergyBefore =
@@ -162,6 +182,12 @@ class MainActivity : ComponentActivity(), CoroutineScope by MainScope() {
                             bundle.getString(key).orEmpty()
                         }
                         clientData.value = dataMap
+                        dataMap?.forEach { (key, value) ->
+                            val floatValue = value.toFloatOrNull() ?: 0f
+                            val existingList = lineData.value?.get(key) ?: emptyList()
+                            val updatedList = existingList + floatValue
+                            lineData.value = lineData.value.orEmpty() + (key to updatedList)
+                        }
                     }
                 }
             }
@@ -171,6 +197,164 @@ class MainActivity : ComponentActivity(), CoroutineScope by MainScope() {
 
             onDispose {
                 context.unregisterReceiver(vpnDataReceiver)
+            }
+        }
+
+        // 更新包信息
+        val handler = Handler(Looper.getMainLooper())
+        val showLog = object : Runnable {
+            override fun run() {
+                val intent = Intent(this@MainActivity, HONVpnService::class.java)
+                intent.action = HONVpnService.ACTION_REQUEST_DATA
+                startService(intent)
+                handler.postDelayed(this, 1000) // 1秒后再次执行
+            }
+        }
+
+        @Composable
+        fun LineChart(
+            wifiData: List<Float>,
+            cellularData: List<Float>,
+            modifier: Modifier = Modifier,
+            pointsToShow: Int = 30 // 新增参数，控制展示的最后若干个数据点
+        ) {
+            // 定义折线图的尺寸
+            val chartHeight = 200.dp
+            val chartWidth = Modifier.fillMaxWidth()
+
+            // 只取最后 pointsToShow 个点
+            val displayedWifiData = wifiData.takeLast(pointsToShow)
+            val displayedCellularData = cellularData.takeLast(pointsToShow)
+
+            Canvas(modifier = modifier
+                .height(chartHeight)
+                .then(chartWidth)) {
+                val pathWifi = Path()
+                val pathCellular = Path()
+
+                // 找到 WiFi 和 Cellular 的全局最大值，确保 Y 轴比例一致
+                val globalMax = maxOf(
+                    displayedWifiData.maxOrNull() ?: 0f,
+                    displayedCellularData.maxOrNull() ?: 0f
+                )
+                val maxPoints = maxOf(displayedWifiData.size, displayedCellularData.size)
+                val widthPerPoint = size.width / (maxPoints - 1)
+                val maxHeight = size.height
+
+                // 底色绘制（浅灰色）
+                drawRect(color = Color.White, size = size)
+
+                // 绘制纵坐标刻度
+                val yAxisStep = globalMax / 5 // 将 Y 轴分成5部分
+                for (i in 0..5) {
+                    val y = maxHeight - (i * yAxisStep / globalMax * maxHeight)
+                    drawLine(
+                        color = Color.Gray,
+                        start = Offset(0f, y),
+                        end = Offset(size.width, y),
+                        strokeWidth = 1f
+                    )
+                    // 绘制纵坐标标注
+                    drawContext.canvas.nativeCanvas.drawText(
+                        "%.1f".format(i * yAxisStep),
+                        10f,
+                        y,
+                        android.graphics.Paint().apply {
+                            color = android.graphics.Color.BLACK
+                            textSize = 30f
+                        }
+                    )
+                }
+
+                drawContext.canvas.nativeCanvas.drawText(
+                    "流量 (B)", // 标注文本
+                    10f, // X 坐标
+                    -50f, // Y 坐标，放在上方
+                    android.graphics.Paint().apply {
+                        color = android.graphics.Color.BLACK
+                        textSize = 30f // 字体大小
+                        isFakeBoldText = true // 加粗
+                    }
+                )
+
+                // 创建WiFi的折线
+                displayedWifiData.forEachIndexed { index, point ->
+                    val x = index * widthPerPoint
+                    val y = maxHeight - (point / globalMax) * maxHeight // 使用全局最大值
+                    if (index == 0) {
+                        pathWifi.moveTo(x, y)
+                    } else {
+                        pathWifi.lineTo(x, y)
+                    }
+                }
+
+                // 创建蜂窝网络的折线
+                displayedCellularData.forEachIndexed { index, point ->
+                    val x = index * widthPerPoint
+                    val y = maxHeight - (point / globalMax) * maxHeight // 使用全局最大值
+                    if (index == 0) {
+                        pathCellular.moveTo(x, y)
+                    } else {
+                        pathCellular.lineTo(x, y)
+                    }
+                }
+
+                // 绘制WiFi线
+                drawPath(
+                    pathWifi,
+                    Color.Blue,
+                    style = androidx.compose.ui.graphics.drawscope.Stroke(5f)
+                )
+
+                // 绘制蜂窝线
+                drawPath(
+                    pathCellular,
+                    Color.Red,
+                    style = androidx.compose.ui.graphics.drawscope.Stroke(5f)
+                )
+
+                // 绘制颜色标注 (图例) - 放置在右上角
+                val legendBoxSize = 30f
+                val legendTextOffset = 40f
+                val rightPadding = 20f
+                val topPadding = 20f
+
+                // 右上角 X、Y 位置
+                val legendXOffset = size.width - legendBoxSize - rightPadding
+                val legendYOffset = topPadding
+
+                // WiFi 标注
+                drawRect(
+                    color = Color.Blue,
+                    topLeft = Offset(legendXOffset, legendYOffset),
+                    size = Size(legendBoxSize, legendBoxSize)
+                )
+                drawContext.canvas.nativeCanvas.drawText(
+                    "WiFi",
+                    legendXOffset + legendTextOffset,
+                    legendYOffset + legendBoxSize,
+                    android.graphics.Paint().apply {
+                        color = android.graphics.Color.BLACK
+                        textSize = 30f
+                    }
+                )
+
+                // Cellular 标注
+                val cellularLegendYOffset = legendYOffset + legendBoxSize + 10f
+                drawRect(
+                    color = Color.Red,
+                    topLeft = Offset(legendXOffset, cellularLegendYOffset),
+                    size = Size(legendBoxSize, legendBoxSize)
+                )
+                drawContext.canvas.nativeCanvas.drawText(
+                    "Cellular",
+                    legendXOffset + legendTextOffset,
+                    cellularLegendYOffset + legendBoxSize,
+                    android.graphics.Paint().apply {
+                        color = android.graphics.Color.BLACK
+                        textSize = 30f
+                    }
+                )
             }
         }
 
@@ -233,7 +417,11 @@ class MainActivity : ComponentActivity(), CoroutineScope by MainScope() {
                         )
                     }
 
-                    Column(modifier = Modifier.padding(20.dp)) {
+                    Column(
+                        modifier = Modifier
+                            .padding(20.dp)
+                            .verticalScroll(rememberScrollState())
+                    ) {
                         // VPN IP地址和端口短输入
                         Row(Modifier.fillMaxWidth()) {
                             OutlinedTextField(value = config.ipAddress!!,
@@ -367,7 +555,10 @@ class MainActivity : ComponentActivity(), CoroutineScope by MainScope() {
                                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                                 singleLine = true,
                             )
-                            Spacer(modifier = Modifier.width(10.dp))
+
+                        }
+
+                        Row {
                             OutlinedTextField(
                                 value = config.rxTimeout.toString(),
                                 onValueChange = { newValue ->
@@ -383,8 +574,23 @@ class MainActivity : ComponentActivity(), CoroutineScope by MainScope() {
                                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                                 singleLine = true,
                             )
+                            Spacer(modifier = Modifier.width(10.dp))
+                            OutlinedTextField(
+                                value = config.ackTimeout.toString(),
+                                onValueChange = { newValue ->
+                                    val value = newValue.toLongOrNull()
+                                    config = if (value != null) {
+                                        config.copy(rxTimeout = value)
+                                    } else {
+                                        config.copy(rxTimeout = 0)
+                                    }
+                                },
+                                label = { Text("ACK超时 (微秒)") },
+                                modifier = Modifier.weight(1f),
+                                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                                singleLine = true,
+                            )
                         }
-
                         // 保守发包率（暂时没用）和模拟丢包率
                         Row {
                             OutlinedTextField(
@@ -432,21 +638,17 @@ class MainActivity : ComponentActivity(), CoroutineScope by MainScope() {
                             Spacer(modifier = Modifier.width(10.dp))
 
                             var expanded by remember { mutableStateOf(false) }
-                            Text(modeOptions[config.mode], modifier = Modifier
-                                .clickable { expanded = true }
-                                .align(Alignment.CenterVertically)
-                                .padding(start = 8.dp))
+                            Text(modeOptions[config.mode],
+                                modifier = Modifier
+                                    .clickable { expanded = true }
+                                    .align(Alignment.CenterVertically)
+                                    .padding(start = 8.dp))
 
-                            DropdownMenu(
-                                expanded = expanded,
-                                onDismissRequest = { expanded = false }
-                            ) {
+                            DropdownMenu(expanded = expanded,
+                                onDismissRequest = { expanded = false }) {
                                 modeOptions.forEachIndexed { index, option ->
                                     DropdownMenuItem(onClick = {
                                         config = config.copy(mode = index)
-                                        if (index == 0) {
-                                            config = config.copy(dataNum = 8, parityNum = 4)
-                                        }
                                         expanded = false
                                     }) {
                                         Text(option)
@@ -455,7 +657,33 @@ class MainActivity : ComponentActivity(), CoroutineScope by MainScope() {
                             }
                         }
 
-                        Spacer(modifier = Modifier.height(20.dp))
+                        // 丢包模式
+                        Row(
+                            Modifier
+                                .fillMaxWidth()
+                                .padding(bottom = 16.dp)
+                        ) {
+                            Text("丢包模式：", modifier = Modifier.align(Alignment.CenterVertically))
+                            var expanded by remember { mutableStateOf(false) }
+                            Text(dropMode,
+                                modifier = Modifier
+                                    .clickable { expanded = true }
+                                    .align(Alignment.CenterVertically)
+                                    .padding(start = 8.dp))
+                            DropdownMenu(
+                                expanded = expanded,
+                                onDismissRequest = { expanded = false }
+                            ) {
+                                dropModeList.forEach { mode ->
+                                    DropdownMenuItem(onClick = {
+                                        dropMode = mode
+                                        expanded = false
+                                    }) {
+                                        Text(mode)
+                                    }
+                                }
+                            }
+                        }
 
                         // 主路选择
                         Row(
@@ -464,7 +692,6 @@ class MainActivity : ComponentActivity(), CoroutineScope by MainScope() {
                                 .padding(bottom = 16.dp)
                         ) {
                             Text("主路选择：", modifier = Modifier.align(Alignment.CenterVertically))
-                            Spacer(modifier = Modifier.width(10.dp))
                             Switch(checked = primaryChannel.value == "Wifi",
                                 onCheckedChange = { isChecked ->
                                     primaryChannel.value = if (isChecked) "Wifi" else "Cellular"
@@ -477,8 +704,6 @@ class MainActivity : ComponentActivity(), CoroutineScope by MainScope() {
                             )
                         }
 
-                        Spacer(modifier = Modifier.height(20.dp))
-
                         // VPN 开始和结束按钮
                         Row(
                             modifier = Modifier.fillMaxWidth(),
@@ -486,23 +711,39 @@ class MainActivity : ComponentActivity(), CoroutineScope by MainScope() {
                         ) {
                             Button(onClick = {
                                 launch {
+                                    updateVpnResult = true
                                     // 先结束vpn，然后再同步配置，最后开始vpn
                                     stopVpn()
+                                    lineData.value = null
                                     syncResult.value = "Loading"
                                     syncResult.value = syncConfig(config)
                                     syncResult.value = ""
-                                    startVpn(config, primaryChannel.value, selectedApp?.packageName)
+                                    startVpn(
+                                        config,
+                                        primaryChannel.value,
+                                        dropMode,
+                                        selectedApp?.packageName
+                                    )
+                                    handler.post(showLog)
                                 }
                             }) {
                                 Text(text = "开始")
                             }
                             Spacer(modifier = Modifier.width(20.dp))
-                            Button(onClick = ::stopVpn) {
+                            Button(onClick = {
+                                launch {
+                                    updateVpnResult = false
+                                    val intent =
+                                        Intent(this@MainActivity, HONVpnService::class.java)
+                                    intent.action = HONVpnService.ACTION_REQUEST_DATA
+                                    startService(intent)
+                                    stopVpn()
+                                    handler.removeCallbacks(showLog)
+                                }
+                            }) {
                                 Text(text = "结束")
                             }
                         }
-
-                        Spacer(modifier = Modifier.height(20.dp))
 
                         // 选择哪个应用的包被VPN拦截
                         Row(
@@ -544,12 +785,83 @@ class MainActivity : ComponentActivity(), CoroutineScope by MainScope() {
                             }
                         }
 
+                        lineData.value?.let { lineMap ->
+
+                            val wifiReceivePacketNum =
+                                lineMap["wifiReceivePacketNum"] ?: emptyList<Float>()
+                            val wifiReceivePacketSize =
+                                lineMap["wifiReceivePacketSize"] ?: emptyList<Float>()
+                            val cellularReceivePacketNum =
+                                lineMap["cellularReceivePacketNum"] ?: emptyList<Float>()
+                            val cellularReceivePacketSize =
+                                lineMap["cellularReceivePacketSize"] ?: emptyList<Float>()
+
+                            val wifiData = mutableListOf<Float>()
+                            for (i in 1 until wifiReceivePacketNum.size) {
+                                val current = wifiReceivePacketNum[i] * wifiReceivePacketSize[i]
+                                val previous =
+                                    wifiReceivePacketNum[i - 1] * wifiReceivePacketSize[i - 1]
+                                wifiData.add(current - previous)
+                            }
+
+                            val cellularData = mutableListOf<Float>()
+                            for (i in 1 until cellularReceivePacketNum.size) {
+                                val current =
+                                    cellularReceivePacketNum[i] * cellularReceivePacketSize[i]
+                                val previous =
+                                    cellularReceivePacketNum[i - 1] * cellularReceivePacketSize[i - 1]
+                                cellularData.add(current - previous)
+                            }
+
+                            LineChart(
+                                wifiData = wifiData,
+                                cellularData = cellularData,
+                                modifier = Modifier.padding(16.dp)
+                            )
+
+                        }
+                        clientData.value?.let { dataMap ->
+//                                Text("vpn发送/接收包个数：${dataMap["vpnSendPacketNum"]}/${dataMap["vpnReceivePacketNum"]}")
+//                                Text(
+//                                    "vpn发送/接收包平均大小：${"%.2f".format(dataMap["vpnSendPacketSize"]?.toDouble() ?: 0.0)}/${
+//                                        "%.2f".format(
+//                                            dataMap["vpnReceivePacketSize"]?.toDouble() ?: 0.0
+//                                        )
+//                                    }"
+//                                )
+
+                            Text("wifi发送/接收包个数：${dataMap["wifiSendPacketNum"]}/${dataMap["wifiReceivePacketNum"]}")
+                            Text(
+                                "wifi发送/接收包平均大小：${"%.2f".format(dataMap["wifiSendPacketSize"]?.toDouble() ?: 0.0)}/${
+                                    "%.2f".format(
+                                        dataMap["wifiReceivePacketSize"]?.toDouble() ?: 0.0
+                                    )
+                                }"
+                            )
+                            Text("蜂窝发送/接收包个数：${dataMap["cellularSendPacketNum"]}/${dataMap["cellularReceivePacketNum"]}")
+                            Text(
+                                "蜂窝发送/接收包平均大小：${"%.2f".format(dataMap["cellularSendPacketSize"]?.toDouble() ?: 0.0)}/${
+                                    "%.2f".format(
+                                        dataMap["cellularReceivePacketSize"]?.toDouble() ?: 0.0
+                                    )
+                                }"
+                            )
+                        }
+
+
+
+                        Spacer(modifier = Modifier.height(100.dp))
                     }
+
                 }
 
                 // 测试页面
                 composable("测试") {
-                    Column(modifier = Modifier.padding(20.dp)) {
+                    Column(
+                        modifier = Modifier
+                            .padding(20.dp)
+                            .verticalScroll(rememberScrollState())
+                    ) {
                         Row(Modifier.fillMaxWidth()) {
                             OutlinedTextField(
                                 value = serverAddress,
@@ -633,19 +945,22 @@ class MainActivity : ComponentActivity(), CoroutineScope by MainScope() {
                                     testJob = CoroutineScope(Dispatchers.IO).launch {
                                         for (thread in 0 until numThreads) {
                                             launch {
+                                                val socket =
+                                                    createSocket(serverAddress, serverPort.toInt())
                                                 for (i in 0 until numTests) {
 //                                                    Log.d(TAG, "test thread=$thread, i=$i")
                                                     val latencyResults = testTcpLatency(
-                                                        serverAddress,
-                                                        serverPort.toInt(),
+                                                        socket,
                                                         packetSize,
                                                     )
-                                                    averageLatency =
-                                                        (averageLatency * i + latencyResults) / (i + 1)
                                                     withContext(Dispatchers.Main) {
                                                         latencyList = latencyList!! + latencyResults
                                                     }
+                                                    averageLatency =
+                                                        (latencyList as MutableList<Long>).average()
+                                                            .toLong()
                                                 }
+                                                socket.close()
                                             }
                                         }
                                     }
@@ -769,10 +1084,13 @@ class MainActivity : ComponentActivity(), CoroutineScope by MainScope() {
                                     Text("客户端等包超时比: ${"%.2f%%".format((dataMap["timeoutRate"]?.toDouble() ?: 0.0) * 100)}")
                                     Text(
                                         "客户端平均等包时间(最短时间/最长时间): ${
-                                            "%.2f(%.2f/%.2f)".format(
-                                                dataMap["rxTime"]?.toDoubleOrNull() ?: 0.0,
-                                                dataMap["rxMin"]?.toDoubleOrNull() ?: 0.0,
-                                                dataMap["rxMax"]?.toDoubleOrNull() ?: 0.0
+                                            "%.2fms(%.2fms/%.2fms)".format(
+                                                dataMap["rxTime"]?.toDoubleOrNull()
+                                                    ?.div(1000000) ?: 0.0,
+                                                dataMap["rxMin"]?.toDoubleOrNull()
+                                                    ?.div(1000000) ?: 0.0,
+                                                dataMap["rxMax"]?.toDoubleOrNull()
+                                                    ?.div(1000000) ?: 0.0
                                             )
                                         }"
                                     )
@@ -783,10 +1101,13 @@ class MainActivity : ComponentActivity(), CoroutineScope by MainScope() {
                                     Text("服务端等包超时比: ${"%.2f%%".format((dataMap["timeout_rate"]?.toDouble() ?: 0.0) * 100)}")
                                     Text(
                                         "服务端平均等包时间(最短时间/最长时间): ${
-                                            "%.2f(%.2f/%.2f)".format(
-                                                dataMap["rx_time"]?.toDoubleOrNull() ?: 0.0,
-                                                dataMap["rx_min"]?.toDoubleOrNull() ?: 0.0,
-                                                dataMap["rx_max"]?.toDoubleOrNull() ?: 0.0
+                                            "%.2fms(%.2fms/%.2fms)".format(
+                                                dataMap["rx_time"]?.toDoubleOrNull()
+                                                    ?.div(1000000) ?: 0.0,
+                                                dataMap["rx_min"]?.toDoubleOrNull()
+                                                    ?.div(1000000) ?: 0.0,
+                                                dataMap["rx_max"]?.toDoubleOrNull()
+                                                    ?.div(1000000) ?: 0.0
                                             )
                                         }"
                                     )
@@ -803,6 +1124,8 @@ class MainActivity : ComponentActivity(), CoroutineScope by MainScope() {
                             Text("功耗： ${powerConsumption} µA") // Assuming energyConsumed is in nanoamperes (nA)
 
                         }
+
+                        Spacer(modifier = Modifier.height(100.dp))
                     }
 
                 }
@@ -812,21 +1135,28 @@ class MainActivity : ComponentActivity(), CoroutineScope by MainScope() {
 
 
     // 串行测试时延
+    private fun createSocket(serverAddress: String, serverPort: Int): Socket {
+        val socket = Socket(serverAddress, serverPort)
+        return socket
+    }
+
+    // 串行测试时延
     private fun testTcpLatency(
-        serverAddress: String,
-        serverPort: Int,
+        socket: Socket,
         packetSize: Int,
     ): Long {
-        val socket = Socket(serverAddress, serverPort)
+        val start = System.currentTimeMillis()
+//        val socket = Socket(serverAddress, serverPort)
         val outStream = DataOutputStream(socket.getOutputStream())
         val inStream = DataInputStream(socket.getInputStream())
         val data = ByteArray(packetSize)
-        val start = System.currentTimeMillis()
         outStream.write(data)
         outStream.flush()
         inStream.readFully(ByteArray(packetSize))
+//        outStream.close()
+//        inStream.close()
+//        socket.close()
         val end = System.currentTimeMillis()
-        socket.close()
         return end - start
     }
 
@@ -985,7 +1315,7 @@ class MainActivity : ComponentActivity(), CoroutineScope by MainScope() {
 
     // 启动！
     private fun startVpn(
-        config: HONConfig, primaryChannel: String, appPackageName: String?
+        config: HONConfig, primaryChannel: String, dropMode: String?, appPackageName: String?
     ) {
         if (config.dataNum <= 0) {
             config.dataNum = 1
@@ -998,6 +1328,7 @@ class MainActivity : ComponentActivity(), CoroutineScope by MainScope() {
                 val vpnIntent = Intent(this@MainActivity, HONVpnService::class.java)
                 vpnIntent.putExtra("CONFIG", config)
                 vpnIntent.putExtra("PRIMARY_CHANNEL", primaryChannel)
+                vpnIntent.putExtra("DROP_MODE", dropMode)
                 vpnIntent.putExtra("APP_PACKAGE_NAME", appPackageName)
                 startService(vpnIntent)
             }
@@ -1006,6 +1337,7 @@ class MainActivity : ComponentActivity(), CoroutineScope by MainScope() {
 
     // 关闭
     private fun stopVpn() {
+
         launch {
             val intent = Intent(this@MainActivity, HONVpnService::class.java)
             intent.action = HONVpnService.ACTION_STOP_VPN

@@ -40,10 +40,15 @@ class HONFecService(
 
     var config: HONConfig? = null
     var primaryChannel = "Cellular"
+    var dropMode = "主路丢包"
 
 
     private var txID: UInt = 0u
     private val txMutex = Mutex()
+
+
+    private var ackList: LinkedList<Triple<Long, Pair<UInt, Int>, ByteArray>> = LinkedList()
+    private var ackMutex = Mutex()
 
     // 接收端等包
     private var rxGroupId: UInt = 0u
@@ -76,7 +81,20 @@ class HONFecService(
     // 双路，两个Channel
     private var cellularUdpChannel: DatagramChannel? = null
     private var wifiUdpChannel: DatagramChannel? = null
-//    private var defaultUdpChannel: DatagramChannel? = null
+
+    // 包数量统计
+    private var vpnSendPacketNum: Long = 0
+    private var vpnSendPacketSize: Double = 0.0
+    private var vpnReceivePacketNum: Long = 0
+    private var vpnReceivePacketSize: Double = 0.0
+    private var cellularSendPacketNum: Long = 0
+    private var cellularSendPacketSize: Double = 0.0
+    private var wifiSendPacketNum: Long = 0
+    private var wifiSendPacketSize: Double = 0.0
+    private var cellularReceivePacketNum: Long = 0
+    private var cellularReceivePacketSize: Double = 0.0
+    private var wifiReceivePacketNum: Long = 0
+    private var wifiReceivePacketSize: Double = 0.0
 
     // Channel的选择器
     private val selector = Selector.open()
@@ -149,6 +167,18 @@ class HONFecService(
         res["rxRate"] = rxRate
         res["rxCount"] = rxCount
         res["rxTotal"] = rxTotal
+        res["vpnSendPacketNum"] = vpnSendPacketNum
+        res["vpnSendPacketSize"] = vpnSendPacketSize
+        res["vpnReceivePacketNum"] = vpnReceivePacketNum
+        res["vpnReceivePacketSize"] = vpnReceivePacketSize
+        res["cellularSendPacketNum"] = cellularSendPacketNum
+        res["cellularSendPacketSize"] = cellularSendPacketSize
+        res["wifiSendPacketNum"] = wifiSendPacketNum
+        res["wifiSendPacketSize"] = wifiSendPacketSize
+        res["cellularReceivePacketNum"] = cellularReceivePacketNum
+        res["cellularReceivePacketSize"] = cellularReceivePacketSize
+        res["wifiReceivePacketNum"] = wifiReceivePacketNum
+        res["wifiReceivePacketSize"] = wifiReceivePacketSize
         return res
     }
 
@@ -193,7 +223,8 @@ class HONFecService(
         val requestCellular =
             NetworkRequest.Builder().addTransportType(NetworkCapabilities.TRANSPORT_CELLULAR)
                 .build()
-        connectivityManager.requestNetwork(requestCellular,
+        connectivityManager.requestNetwork(
+            requestCellular,
             object : ConnectivityManager.NetworkCallback() {
                 @RequiresApi(Build.VERSION_CODES.M)
                 override fun onAvailable(network: Network) {
@@ -212,7 +243,8 @@ class HONFecService(
 
         val requestWifi =
             NetworkRequest.Builder().addTransportType(NetworkCapabilities.TRANSPORT_WIFI).build()
-        connectivityManager.requestNetwork(requestWifi,
+        connectivityManager.requestNetwork(
+            requestWifi,
             object : ConnectivityManager.NetworkCallback() {
                 @RequiresApi(Build.VERSION_CODES.M)
                 override fun onAvailable(network: Network) {
@@ -258,17 +290,18 @@ class HONFecService(
         loop@ while (true) {
             val packet = outputChannel.receive()
             outputMutex.lock()
+            vpnSendPacketNum += 1
+            vpnSendPacketSize =
+                ((vpnSendPacketNum - 1).toDouble() / vpnSendPacketNum.toDouble() * vpnSendPacketSize) + packet.rawData!!.size / vpnSendPacketNum.toDouble()
 
             // 主路选择
             val dataChannel =
                 if ((primaryChannel == "Cellular" && isCellularAvailable.get()) || !isWifiAvailable.get()) {
-//                    Log.d(TAG, "dataChannel is Cellular")
+                    Log.d(TAG, "dataChannel is Cellular")
                     cellularUdpChannel
                 } else {
-//                    Log.d(TAG, "dataChannel is Wifi")
                     wifiUdpChannel
                 }
-
 
 //            val buffer = ByteBuffer.allocate(bufferSize)
 //            buffer.put(packet.rawData!!)
@@ -287,6 +320,7 @@ class HONFecService(
 //            outputMutex.unlock()
 //            continue@loop
 
+
             // 更新group下的index
             index += 1
 
@@ -301,23 +335,24 @@ class HONFecService(
 
             // 发送该数据包
             outputSend(
-                groupId,
-                index,
-                packet.rawData!!,
-                dataChannel
+                groupId, index, packet.rawData!!, dataChannel
             )
 
             // 如果是多倍发包的模式，则再发一个数据包
             if (config!!.mode == 2) {
                 val parityChannel =
                     if (isWifiAvailable.get() && primaryChannel == "Cellular" || !isCellularAvailable.get()) {
-//                        Log.d(TAG, "parityChannel is Wifi")
+                        Log.d(TAG, "parityChannel is Wifi")
                         wifiUdpChannel
                     } else {
-//                        Log.d(TAG, "parityChannel is Cellular")
+                        Log.d(TAG, "parityChannel is Cellular")
                         cellularUdpChannel
                     }
                 outputSend(groupId, index + config!!.dataNum, packet.rawData!!, parityChannel)
+            }
+
+            if (config!!.mode == 3) {
+
             }
 
             // 如果累计了dataNum个数据包，就进行这一个group数据包的冗余包构建
@@ -336,8 +371,9 @@ class HONFecService(
 
                     val beforeEnc = System.nanoTime()
 
-                    val encodedData =
-                        encode(config!!.dataNum, blockNum, packetBuffers, blockSize, config!!.mode)
+                    val encodedData = encode(
+                        config!!.dataNum, blockNum, packetBuffers, blockSize, config!!.mode
+                    )
 
                     val afterEnc = System.nanoTime()
                     val timeDelta = afterEnc - beforeEnc
@@ -351,14 +387,17 @@ class HONFecService(
 
                     val parityChannel =
                         if (isWifiAvailable.get() && primaryChannel == "Cellular" || !isCellularAvailable.get()) {
-//                            Log.d(TAG, "parityChannel is Wifi")
+                            Log.d(TAG, "parityChannel is Wifi")
                             wifiUdpChannel
                         } else {
-//                            Log.d(TAG, "parityChannel is Cellular")
+                            Log.d(TAG, "parityChannel is Cellular")
                             cellularUdpChannel
                         }
 
                     for (parityIndex in 0 until config!!.parityNum) {
+                        if (parityChannel == wifiUdpChannel) {
+
+                        }
                         outputSend(
                             groupId,
                             config!!.dataNum + parityIndex,
@@ -370,6 +409,7 @@ class HONFecService(
                 packetBuffers = Array(blockNum) { ByteArray(0) }
                 index = -1
             }
+
             outputMutex.unlock()
         }
     }
@@ -403,6 +443,23 @@ class HONFecService(
                         }
                     }
                     if (readBytes > 0) {
+                        vpnReceivePacketNum += 1
+                        vpnReceivePacketSize =
+                            ((vpnReceivePacketNum - 1).toDouble() / vpnReceivePacketNum.toDouble() * vpnReceivePacketSize) + readBytes / vpnReceivePacketNum.toDouble()
+                        if (channel == wifiUdpChannel) {
+                            wifiReceivePacketNum += 1
+                            wifiReceivePacketSize =
+                                ((wifiReceivePacketNum - 1).toDouble() / wifiReceivePacketNum.toDouble() * wifiReceivePacketSize) + readBytes / wifiReceivePacketNum.toDouble()
+                        } else if (channel == cellularUdpChannel) {
+                            cellularReceivePacketNum += 1
+                            cellularReceivePacketSize =
+                                ((cellularReceivePacketNum - 1).toDouble() / cellularReceivePacketNum.toDouble() * cellularReceivePacketSize) + readBytes / cellularReceivePacketNum.toDouble()
+                        }
+                        Log.d(
+                            TAG,
+                            "channel: wifi接收个数=$wifiReceivePacketNum, wifi接收字节=$wifiReceivePacketSize, 蜂窝接收个数=$cellularReceivePacketNum, 蜂窝接收字节=$cellularReceivePacketSize, $channelType"
+                        )
+
                         readBuf.flip()
                         val inputBuf = ByteBuffer.allocate(readBytes)
                         inputBuf.put(readBuf)
@@ -441,14 +498,22 @@ class HONFecService(
 //            Log.d(TAG, "outputSend dropout")
 //            return
 //        }
-        if ((1..100).random() <= config!!.dropRate) {
-//            Log.d(TAG, "outputSend dropout")
-            return
+        if (dropMode == "主路随机丢包") {
+            if ((udpChannel == wifiUdpChannel && primaryChannel == "Wifi") || (udpChannel == cellularUdpChannel && primaryChannel == "Cellular")) {
+                if ((1..100).random() <= config!!.dropRate) {
+                    return
+                }
+            }
+        } else {
+            if ((1..100).random() <= config!!.dropRate) {
+                return
+            }
         }
 
         val buffer = ByteBuffer.allocate(bufferSize)
 
         val packetSendTime = System.currentTimeMillis()
+        buffer.putInt(0) // packet类别，0代表数据/冗余包
         buffer.putInt(groupID.toInt())
         buffer.putInt(index)
         buffer.putLong(packetSendTime)
@@ -471,30 +536,55 @@ class HONFecService(
             }
         }
         buffer.flip()
+
+        if (udpChannel == wifiUdpChannel) {
+            wifiSendPacketNum += 1
+            wifiSendPacketSize =
+                ((wifiSendPacketNum - 1).toDouble() / wifiSendPacketNum.toDouble() * wifiSendPacketSize) + block.size / wifiSendPacketNum.toDouble()
+            Log.d(
+                TAG,
+                "channel: wifi发送个数=$wifiSendPacketNum, wifi发送字节=$wifiSendPacketSize, 蜂窝发送个数=$cellularSendPacketNum, 蜂窝发送字节=$cellularSendPacketSize wifi"
+            )
+        } else if (udpChannel == cellularUdpChannel) {
+            cellularSendPacketNum += 1
+            cellularSendPacketSize =
+                ((cellularSendPacketNum - 1).toDouble() / cellularSendPacketNum.toDouble() * cellularSendPacketSize) + block.size / cellularSendPacketNum.toDouble()
+            Log.d(
+                TAG,
+                "channel: wifi发送个数=$wifiSendPacketNum, wifi发送字节=$wifiSendPacketSize, 蜂窝发送个数=$cellularSendPacketNum, 蜂窝发送字节=$cellularSendPacketSize cellular"
+            )
+        } else {
+            Log.d(TAG, "channel: group_id=$groupID, index=$index, none")
+        }
     }
 
     private suspend fun serveInput(inputBuf: ByteBuffer, channelType: String) = coroutineScope {
+        val packetType = inputBuf.int
         val groupId = inputBuf.int.toUInt()
-        cacheMutex.lock()
-        val channel = cache.getOrPut(
-            groupId
-        ) {
-            val newChannel = Channel<Pair<String, ByteBuffer>>()
-            launch {
-                handleDecode(
-                    groupId, newChannel
-                )
+        if (packetType == 0) {
+            Log.d(TAG, "serveInput: data, $packetType")
+            cacheMutex.lock()
+            val channel = cache.getOrPut(
+                groupId
+            ) {
+                val newChannel = Channel<Pair<String, ByteBuffer>>()
+                launch {
+                    handleDecode(
+                        groupId, newChannel
+                    )
+                }
+                newChannel
             }
-            newChannel
+            channel.send(Pair(channelType, inputBuf))
+            cacheMutex.unlock()
+        } else {
+            Log.d(TAG, "serveInput: ACK, $packetType")
         }
-        channel.send(Pair(channelType, inputBuf))
-        cacheMutex.unlock()
 
     }
 
     private suspend fun handleDecode(
-        groupId: UInt,
-        channel: Channel<Pair<String, ByteBuffer>>
+        groupId: UInt, channel: Channel<Pair<String, ByteBuffer>>
     ) {
         val blockNum = config!!.dataNum + config!!.parityNum
         val dataBlocks = Array<ByteArray?>(blockNum) { null }
@@ -527,12 +617,27 @@ class HONFecService(
 //                if(index==config!!.dataNum-1){
 //                    continue
 //                }
-                Log.d(TAG, "input: groupId=$groupId, index=$index, length=${inputBuf.remaining()}")
+                Log.d(
+                    TAG,
+                    "input: groupId=$groupId, index=$index, length=${inputBuf.remaining()}, channelType=$channelType, primaryChannel=$primaryChannel, dropMode=$dropMode"
+                )
                 val randomNum = (1..100).random()
-                if (randomNum <= (config!!.dropRate)) {
+                if (dropMode == "主路随机丢包") {
+                    if ((channelType == "wifi" && primaryChannel == "Wifi") || (channelType == "cellular" && primaryChannel == "Cellular")) {
+                        if (randomNum <= (config!!.dropRate)) {
+                            continue
+                        }
+                    }
+                } else {
+                    if (randomNum <= (config!!.dropRate)) {
 //                    Log.d(TAG, "handleDecode: groupId=$groupId, index=$index dropout $randomNum")
-                    continue
+                        continue
+                    }
                 }
+                Log.d(
+                    TAG,
+                    "nondrop input: groupId=$groupId, index=$index, length=${inputBuf.remaining()}"
+                )
 
                 val packetReceiveTime = System.currentTimeMillis()
                 if (channelType == "wifi") {
@@ -569,13 +674,12 @@ class HONFecService(
                     rxSend()
                     rxMutex.unlock()
                 }
-
                 // 把包的内容复制到dataBlocks里面
                 dataBlocks[index] = ByteArray(inputBuf.remaining())
                 inputBuf.get(dataBlocks[index]!!)
 
                 // 如果可以解码就解码
-                if (receiveNum == config!!.dataNum) {
+                if ((config!!.mode == 0 || config!!.mode == 1) && receiveNum == config!!.dataNum) {
                     var blockSize = dataBlocks.filterNotNull().maxOf { it.size }
                     if (config!!.mode == 0) {
                         blockSize += (4 - blockSize % 4) % 4
@@ -584,11 +688,7 @@ class HONFecService(
                         if (dataBlocks[i] != null && dataBlocks[i]!!.size < blockSize) {
                             val newArray = ByteArray(blockSize)
                             System.arraycopy(
-                                dataBlocks[i]!!,
-                                0,
-                                newArray,
-                                0,
-                                dataBlocks[i]!!.size
+                                dataBlocks[i]!!, 0, newArray, 0, dataBlocks[i]!!.size
                             )
                             dataBlocks[i] = newArray
                         }

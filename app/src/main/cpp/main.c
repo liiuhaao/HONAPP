@@ -63,6 +63,9 @@ Java_com_example_honapp_HONFecService_encode(JNIEnv *env, jobject thiz, jint dat
                                              jint block_num,
                                              jobjectArray packet_buffers, jint block_size,
                                              jint mode) {
+    if (mode == 0) {
+        block_num = 12;
+    }
     jbyte arr[block_num][block_size];
     memset(arr, 0, sizeof(arr));
     unsigned char *data_blocks[block_num];
@@ -79,8 +82,8 @@ Java_com_example_honapp_HONFecService_encode(JNIEnv *env, jobject thiz, jint dat
 
     if (mode == 0) {
 //        log_data(data_blocks, "origin", block_num, block_size);
-
-        jbyte **parity_pacekts = (jbyte **) fec_encode(data_num, block_num - data_num, block_size,
+        // 这里先写死用8+4，最后返回的是前parity_num个冗余包
+        jbyte **parity_pacekts = (jbyte **) fec_encode(8, 4, block_size,
                                                        data_blocks);
 
 //        log_data(parity_pacekts, "encode", block_num - data_num, block_size);
@@ -141,30 +144,36 @@ JNIEXPORT jobjectArray JNICALL
 Java_com_example_honapp_HONFecService_decode(JNIEnv *env, jobject thiz, jint data_num,
                                              jint block_num, jobjectArray encode_data,
                                              jint block_size, jint mode) {
+    jint parity_num = block_num - data_num;
+    // 自研FEC写死用8+4的配置
+    if (mode == 0) {
+        block_num = 12;
+    }
+
     jbyte arr[block_num][block_size];
     unsigned char *data_blocks[block_num];
     unsigned char marks[block_num];
     memset(arr, 0, sizeof(arr));
     memset(marks, 0, block_num);
     for (int i = 0; i < block_num; i++) {
-        jbyteArray block = (*env)->GetObjectArrayElement(env, encode_data, i);
-        if (block) {
-            (*env)->GetByteArrayRegion(env, block, 0, block_size, arr[i]);
-            data_blocks[i] = (unsigned char *) arr[i];
-        } else {
-            data_blocks[i] = (unsigned char *) arr[i];
-            marks[i] = 1;
+        if (i < data_num + parity_num) {
+            jbyteArray block = (*env)->GetObjectArrayElement(env, encode_data, i);
+            if (block) {
+                (*env)->GetByteArrayRegion(env, block, 0, block_size, arr[i]);
+                data_blocks[i] = (unsigned char *) arr[i];
+                continue;
+            }
         }
+        data_blocks[i] = (unsigned char *) arr[i];
+        marks[i] = 1;
     }
 
     log_data((unsigned char **) (char **) data_blocks, "Before Decode", block_num, block_size);
 
-    if (block_num > data_num) {
+    if (parity_num > 0) {
         if (mode == 0) {
-            LOGD("try to fec_decode.......");
             fec_decode(data_num, block_num - data_num, block_size, data_blocks,
                        marks);
-            LOGD("fec_decode done!!!");
         } else {
             reed_solomon *rs = reed_solomon_new(data_num, block_num - data_num);
             reed_solomon_reconstruct(rs, data_blocks, marks, block_num,
