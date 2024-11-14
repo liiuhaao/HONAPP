@@ -142,6 +142,9 @@ class HONFecService(
                 launch { outputLoop() }
                 launch { inputLoop() }
                 launch { monitorRxTimeout() }
+                if (config!!.mode == 3) {
+                    launch { monitorACK() }
+                }
                 Log.i(TAG, "Start service")
             }
         }
@@ -352,7 +355,15 @@ class HONFecService(
             }
 
             if (config!!.mode == 3) {
-
+                ackMutex.lock()
+                ackList.add(
+                    Triple(
+                        System.currentTimeMillis(),
+                        Pair(groupId, index),
+                        packet.rawData!!
+                    )
+                )
+                ackMutex.unlock()
             }
 
             // 如果累计了dataNum个数据包，就进行这一个group数据包的冗余包构建
@@ -578,7 +589,19 @@ class HONFecService(
             channel.send(Pair(channelType, inputBuf))
             cacheMutex.unlock()
         } else {
-            Log.d(TAG, "serveInput: ACK, $packetType")
+            ackMutex.lock()
+            val index = inputBuf.int
+            val packetSendTime = inputBuf.long
+            for (ack in ackList) {
+                if (ack.second.first == groupId && ack.second.second == index) {
+                    ackList.remove(ack)
+
+                    Log.d(TAG, "ackList remove groupId=$groupId index=$index timeDelta=${System.nanoTime() - packetSendTime}")
+                    break
+                }
+            }
+            ackPrint()
+            ackMutex.unlock()
         }
 
     }
@@ -830,6 +853,47 @@ class HONFecService(
                 rxSend()
             }
             rxMutex.unlock()
+        }
+    }
+
+    private suspend fun ackPrint() = coroutineScope {
+
+        // print ack list
+        var ackLog = ""
+        ackLog += "Left ${ackList.size} in ackList={"
+        for (ack in ackList) {
+            ackLog += "(${ack.second.first}, ${ack.second.second}), "
+        }
+        ackLog += "}"
+        Log.d(TAG, ackLog)
+    }
+
+    private suspend fun monitorACK() = coroutineScope {
+        while (true) {
+            delay(100)
+            ackMutex.lock()
+            val now = System.nanoTime()
+            while (ackList.isNotEmpty() && now - ackList.first.first > config!!.ackTimeout * 1000) {
+                val timeDelta = now - ackList.first.first
+                val ack = ackList.first()
+                val groupId = ack.second.first
+                val index = ack.second.second
+                val packet = IpV4Packet(ByteBuffer.wrap(ack.third))
+                val parityChannel =
+                    if (isWifiAvailable.get() && primaryChannel == "Cellular" || !isCellularAvailable.get()) {
+                        Log.d(TAG, "parityChannel is Wifi")
+                        wifiUdpChannel
+                    } else {
+                        Log.d(TAG, "parityChannel is Cellular")
+                        cellularUdpChannel
+                    }
+                outputSend(
+                    groupId, index, packet.rawData!!, parityChannel
+                )
+                ackList.removeFirst()
+                Log.d(TAG, "ackTimeout: groupId=${ack.second.first}, index=${ack.second.second}, timeDelta=$timeDelta")
+            }
+            ackMutex.unlock()
         }
     }
 

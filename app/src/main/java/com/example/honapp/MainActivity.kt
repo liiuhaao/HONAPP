@@ -114,7 +114,7 @@ class MainActivity : ComponentActivity(), CoroutineScope by MainScope() {
                     encodeTimeout = 1000000,
                     decodeTimeout = 1000000,
                     rxTimeout = 100000,
-                    ackTimeout = 50000,
+                    ackTimeout = 200000,
                     primaryProbability = 80,
                     ipAddress = "106.75.223.143",
                     port = "54345",
@@ -580,9 +580,9 @@ class MainActivity : ComponentActivity(), CoroutineScope by MainScope() {
                                 onValueChange = { newValue ->
                                     val value = newValue.toLongOrNull()
                                     config = if (value != null) {
-                                        config.copy(rxTimeout = value)
+                                        config.copy(ackTimeout = value)
                                     } else {
-                                        config.copy(rxTimeout = 0)
+                                        config.copy(ackTimeout = 0)
                                     }
                                 },
                                 label = { Text("ACK超时 (微秒)") },
