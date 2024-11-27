@@ -66,6 +66,7 @@ import androidx.compose.ui.graphics.Color
 import kotlin.io.path.Path
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.nativeCanvas
+import java.io.IOException
 
 
 class MainActivity : ComponentActivity(), CoroutineScope by MainScope() {
@@ -113,7 +114,7 @@ class MainActivity : ComponentActivity(), CoroutineScope by MainScope() {
                     rxNum = 100,
                     encodeTimeout = 1000000,
                     decodeTimeout = 1000000,
-                    rxTimeout = 100000,
+                    rxTimeout = 500000,
                     ackTimeout = 200000,
                     primaryProbability = 80,
                     ipAddress = "106.75.223.143",
@@ -226,9 +227,11 @@ class MainActivity : ComponentActivity(), CoroutineScope by MainScope() {
             val displayedWifiData = wifiData.takeLast(pointsToShow)
             val displayedCellularData = cellularData.takeLast(pointsToShow)
 
-            Canvas(modifier = modifier
-                .height(chartHeight)
-                .then(chartWidth)) {
+            Canvas(
+                modifier = modifier
+                    .height(chartHeight)
+                    .then(chartWidth)
+            ) {
                 val pathWifi = Path()
                 val pathCellular = Path()
 
@@ -796,20 +799,32 @@ class MainActivity : ComponentActivity(), CoroutineScope by MainScope() {
                             val cellularReceivePacketSize =
                                 lineMap["cellularReceivePacketSize"] ?: emptyList<Float>()
 
+
+                            val wifiSendPacketNum =
+                                lineMap["wifiSendPacketNum"] ?: emptyList<Float>()
+                            val wifiSendPacketSize =
+                                lineMap["wifiSendPacketSize"] ?: emptyList<Float>()
+                            val cellularSendPacketNum =
+                                lineMap["cellularSendPacketNum"] ?: emptyList<Float>()
+                            val cellularSendPacketSize =
+                                lineMap["cellularSendPacketSize"] ?: emptyList<Float>()
+
+
                             val wifiData = mutableListOf<Float>()
                             for (i in 1 until wifiReceivePacketNum.size) {
-                                val current = wifiReceivePacketNum[i] * wifiReceivePacketSize[i]
+                                val current =
+                                    wifiReceivePacketNum[i] * wifiReceivePacketSize[i] + wifiSendPacketNum[i] * wifiSendPacketSize[i]
                                 val previous =
-                                    wifiReceivePacketNum[i - 1] * wifiReceivePacketSize[i - 1]
+                                    wifiReceivePacketNum[i - 1] * wifiReceivePacketSize[i - 1] + wifiSendPacketNum[i - 1] * wifiSendPacketSize[i - 1]
                                 wifiData.add(current - previous)
                             }
 
                             val cellularData = mutableListOf<Float>()
                             for (i in 1 until cellularReceivePacketNum.size) {
                                 val current =
-                                    cellularReceivePacketNum[i] * cellularReceivePacketSize[i]
+                                    cellularReceivePacketNum[i] * cellularReceivePacketSize[i] + cellularSendPacketNum[i] * cellularSendPacketSize[i]
                                 val previous =
-                                    cellularReceivePacketNum[i - 1] * cellularReceivePacketSize[i - 1]
+                                    cellularReceivePacketNum[i - 1] * cellularReceivePacketSize[i - 1] + cellularSendPacketNum[i - 1] * cellularSendPacketSize[i - 1]
                                 cellularData.add(current - previous)
                             }
 
@@ -1147,12 +1162,16 @@ class MainActivity : ComponentActivity(), CoroutineScope by MainScope() {
     ): Long {
         val start = System.currentTimeMillis()
 //        val socket = Socket(serverAddress, serverPort)
-        val outStream = DataOutputStream(socket.getOutputStream())
-        val inStream = DataInputStream(socket.getInputStream())
-        val data = ByteArray(packetSize)
-        outStream.write(data)
-        outStream.flush()
-        inStream.readFully(ByteArray(packetSize))
+        try {
+            val outStream = DataOutputStream(socket.getOutputStream())
+            val inStream = DataInputStream(socket.getInputStream())
+            val data = ByteArray(packetSize)
+            outStream.write(data)
+            outStream.flush()
+            inStream.readFully(ByteArray(packetSize))
+        } catch (e: IOException) {
+            e.printStackTrace() // 或者记录日志，避免直接打印
+        }
 //        outStream.close()
 //        inStream.close()
 //        socket.close()
