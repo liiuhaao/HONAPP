@@ -16,6 +16,7 @@ import java.nio.ByteBuffer
 import java.nio.channels.DatagramChannel
 import java.nio.channels.SelectionKey
 import java.nio.channels.Selector
+import java.security.KeyStore.TrustedCertificateEntry
 import java.util.*
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.max
@@ -43,6 +44,13 @@ class HONFecService(
     var config: HONConfig? = null
     var primaryChannel = "Cellular"
     var dropMode = "主路丢包"
+
+    private val outputConstructDelayMax: Long = 100
+    private val outputConstructDelayStep: Long = 10
+    private val outputConstructDelayTime: Long = 20
+    private var outputConstructDelayNow: Long = 0
+    private var outputConstructDelayCount: Long = 0
+    private var outputConstructDelayDirect: Long = -1
 
 
     private var txID: UInt = 0u
@@ -97,6 +105,16 @@ class HONFecService(
     private var cellularReceivePacketSize: Double = 0.0
     private var wifiReceivePacketNum: Long = 0
     private var wifiReceivePacketSize: Double = 0.0
+    private var repeatReceivePacketNum: Long = 0
+
+
+    private var serverDataSendPacketNum: Int = 0
+    private var serverParitySendPacketNum: Int = 0
+    private var serverDataReceivePacketNum: Int = 0
+    private var serverParityReceivePacketNum: Int = 0
+    private var serverRepeatReceivePacketNum: Int = 0
+    private var serverParityStatus: Int = 0
+
 
     // Channel的选择器
     private val selector = Selector.open()
@@ -116,6 +134,13 @@ class HONFecService(
 
     val isCellularAvailable = AtomicBoolean(false)
     val isWifiAvailable = AtomicBoolean(false)
+
+    private var parityStatus: Boolean = false
+    private var delayNow: Long = 10
+    private var delayOverThresTime: Long = 0
+    private var delayBelowThresTime: Long = 0
+    private var parityStatusMutex = Mutex()
+    private var parityResetJob: Job? = null
 
     fun start(inetAddress: InetAddress, port: Int) {
         launch {
@@ -144,7 +169,7 @@ class HONFecService(
                 launch { outputLoop() }
                 launch { inputLoop() }
                 launch { monitorRxTimeout() }
-                if (config!!.mode == 3) {
+                if ((config!!.mode == 3) || (config!!.mode == 4)) {
                     launch { monitorACK() }
                 }
                 Log.i(TAG, "Start service")
@@ -184,6 +209,16 @@ class HONFecService(
         res["cellularReceivePacketSize"] = cellularReceivePacketSize
         res["wifiReceivePacketNum"] = wifiReceivePacketNum
         res["wifiReceivePacketSize"] = wifiReceivePacketSize
+        res["repeatReceivePacketNum"] = repeatReceivePacketNum
+
+        res["serverDataSendPacketNum"] = serverDataSendPacketNum
+        res["serverParitySendPacketNum"] = serverParitySendPacketNum
+        res["serverDataReceivePacketNum"] = serverDataReceivePacketNum
+        res["serverParityReceivePacketNum"] = serverParityReceivePacketNum
+        res["serverRepeatReceivePacketNum"] = serverRepeatReceivePacketNum
+        res["parityStatus"] = parityStatus
+        res["serverParityStatus"] = serverParityStatus
+
         return res
     }
 
@@ -299,7 +334,8 @@ class HONFecService(
 
             // 主路选择
             val dataChannel =
-                if ((primaryChannel == "Cellular" && isCellularAvailable.get()) || !isWifiAvailable.get()) {
+//                if ((primaryChannel == "Cellular" && isCellularAvailable.get()) || !isWifiAvailable.get()) {
+                if (primaryChannel == "Cellular") {
                     Log.d(TAG, "dataChannel is Cellular")
                     cellularUdpChannel
                 } else {
@@ -335,16 +371,27 @@ class HONFecService(
                 groupId = getGroupId()
             }
 
-
+            if (config!!.mode == 3 || config!!.mode == 4) {
+                ackMutex.lock()
+                ackList.add(
+                    Triple(
+                        System.nanoTime(), Pair(groupId, index), packet.rawData!!
+                    )
+                )
+                ackMutex.unlock()
+            }
             // 发送该数据包
+            val startTime = System.currentTimeMillis()
             outputSend(
                 groupId, index, packet.rawData!!, dataChannel, DATA_PACKET
             )
 
+
             // 如果是多倍发包的模式，则再发一个数据包
-            if (config!!.mode == 2) {
+            if ((config!!.mode == 2) || (config!!.mode == 4 && parityStatus)) {
                 val parityChannel =
-                    if (isWifiAvailable.get() && primaryChannel == "Cellular" || !isCellularAvailable.get()) {
+                    if (primaryChannel == "Cellular") {
+//                    if (isWifiAvailable.get() && primaryChannel == "Cellular" || !isCellularAvailable.get()) {
                         Log.d(TAG, "parityChannel is Wifi")
                         wifiUdpChannel
                     } else {
@@ -356,15 +403,6 @@ class HONFecService(
                 )
             }
 
-            if (config!!.mode == 3) {
-                ackMutex.lock()
-                ackList.add(
-                    Triple(
-                        System.nanoTime(), Pair(groupId, index), packet.rawData!!
-                    )
-                )
-                ackMutex.unlock()
-            }
 
             // 如果累计了dataNum个数据包，就进行这一个group数据包的冗余包构建
             if (index + 1 == config!!.dataNum) {
@@ -397,7 +435,8 @@ class HONFecService(
                     encMin = min(encMin, timeDelta.toDouble())
 
                     val parityChannel =
-                        if (isWifiAvailable.get() && primaryChannel == "Cellular" || !isCellularAvailable.get()) {
+//                        if (isWifiAvailable.get() && primaryChannel == "Cellular" || !isCellularAvailable.get()) {
+                        if (primaryChannel == "Cellular") {
                             Log.d(TAG, "parityChannel is Wifi")
                             wifiUdpChannel
                         } else {
@@ -452,8 +491,6 @@ class HONFecService(
                         }
                     }
                     if (readBytes > 0) {
-
-
                         readBuf.flip()
                         val inputBuf = ByteBuffer.allocate(readBytes)
                         inputBuf.put(readBuf)
@@ -473,7 +510,7 @@ class HONFecService(
                                     continue
                                 }
                             }
-                        } else {
+                        } else if (dropMode == "双路随机丢包") {
                             if ((1..100).random() <= config!!.dropRate) {
                                 continue
                             }
@@ -525,16 +562,57 @@ class HONFecService(
         if (udpChannel == null) {
             return
         }
+        if (packetType == 0 && block != null) {
+            if (udpChannel == wifiUdpChannel) {
+                wifiSendPacketNum += 1
+                wifiSendPacketSize =
+                    ((wifiSendPacketNum - 1).toDouble() / wifiSendPacketNum.toDouble() * wifiSendPacketSize) + block.size / wifiSendPacketNum.toDouble()
+                Log.d(
+                    TAG,
+                    "channel: wifi发送个数=$wifiSendPacketNum, wifi发送字节=$wifiSendPacketSize, 蜂窝发送个数=$cellularSendPacketNum, 蜂窝发送字节=$cellularSendPacketSize wifi"
+                )
+            } else if (udpChannel == cellularUdpChannel) {
+                cellularSendPacketNum += 1
+                cellularSendPacketSize =
+                    ((cellularSendPacketNum - 1).toDouble() / cellularSendPacketNum.toDouble() * cellularSendPacketSize) + block.size / cellularSendPacketNum.toDouble()
+                Log.d(
+                    TAG,
+                    "channel: wifi发送个数=$wifiSendPacketNum, wifi发送字节=$wifiSendPacketSize, 蜂窝发送个数=$cellularSendPacketNum, 蜂窝发送字节=$cellularSendPacketSize cellular"
+                )
+            } else {
+                Log.d(TAG, "channel: group_id=$groupID, index=$index, none")
+            }
+        }
+        val buffer = ByteBuffer.allocate(bufferSize)
+
+        val packetSendTime = System.currentTimeMillis()
+
         if (dropMode == "主路随机丢包") {
             if ((udpChannel == wifiUdpChannel && primaryChannel == "Wifi") || (udpChannel == cellularUdpChannel && primaryChannel == "Cellular")) {
+                Log.d("DROP!!!!", "try drop")
                 if ((1..100).random() <= config!!.dropRate) {
+                    Log.d("DROP!!!!", "drop success!!!!!!!!!!!!!!")
                     return
                 }
             }
-        } else {
+        } else if (dropMode == "双路随机丢包") {
             if ((1..100).random() <= config!!.dropRate) {
                 return
             }
+        } else if (dropMode == "主路构造时延") {
+            outputConstructDelayCount += 1
+            if (outputConstructDelayCount == outputConstructDelayTime) {
+                if (outputConstructDelayNow == 0.toLong() || outputConstructDelayNow == outputConstructDelayMax) {
+                    outputConstructDelayDirect *= -1
+                }
+                outputConstructDelayNow += outputConstructDelayDirect * outputConstructDelayStep
+                outputConstructDelayCount = 0
+            }
+            Log.d(
+                TAG,
+                "PAT outputConstructDelayNow=$outputConstructDelayNow packetType=$packetType parityStatus=$parityStatus groupID=$groupID index=$index packetType=$packetType"
+            )
+            delay(outputConstructDelayNow)
         }
         Log.d(TAG, "outputSend: groupId=$groupID, index=$index")
 //        if (index == config!!.dataNum - 1) {
@@ -542,9 +620,6 @@ class HONFecService(
 //            return
 //        }
 
-        val buffer = ByteBuffer.allocate(bufferSize)
-
-        val packetSendTime = System.currentTimeMillis()
         buffer.putInt(packetType) // packet类别，0代表数据/冗余包
         buffer.putInt(groupID.toInt())
         buffer.putInt(index)
@@ -571,27 +646,41 @@ class HONFecService(
         }
         buffer.flip()
 
-        if (packetType == 0 && block != null) {
-            if (udpChannel == wifiUdpChannel) {
-                wifiSendPacketNum += 1
-                wifiSendPacketSize =
-                    ((wifiSendPacketNum - 1).toDouble() / wifiSendPacketNum.toDouble() * wifiSendPacketSize) + block.size / wifiSendPacketNum.toDouble()
-                Log.d(
-                    TAG,
-                    "channel: wifi发送个数=$wifiSendPacketNum, wifi发送字节=$wifiSendPacketSize, 蜂窝发送个数=$cellularSendPacketNum, 蜂窝发送字节=$cellularSendPacketSize wifi"
-                )
-            } else if (udpChannel == cellularUdpChannel) {
-                cellularSendPacketNum += 1
-                cellularSendPacketSize =
-                    ((cellularSendPacketNum - 1).toDouble() / cellularSendPacketNum.toDouble() * cellularSendPacketSize) + block.size / cellularSendPacketNum.toDouble()
-                Log.d(
-                    TAG,
-                    "channel: wifi发送个数=$wifiSendPacketNum, wifi发送字节=$wifiSendPacketSize, 蜂窝发送个数=$cellularSendPacketNum, 蜂窝发送字节=$cellularSendPacketSize cellular"
-                )
-            } else {
-                Log.d(TAG, "channel: group_id=$groupID, index=$index, none")
-            }
+
+    }
+
+    private suspend fun parity_status_fun(ack: Triple<Long, Pair<UInt, Int>, ByteArray>) {
+        parityStatusMutex.lock()
+        delayNow = (System.nanoTime() - ack.first) / 1000000
+        if (delayNow > config!!.parityDelayThres) {
+            delayOverThresTime += 1
+            delayBelowThresTime = 0
+        } else {
+            delayBelowThresTime += 1
+            delayOverThresTime = 0
         }
+        parityStatusMutex.unlock()
+        if (delayOverThresTime >= 2) {
+            parityStatus = true
+//            parityResetJob?.cancel()
+//            parityResetJob = CoroutineScope(Dispatchers.Default).launch {
+//                parityStatusMutex.lock()
+//                parityStatus = true
+//                parityStatusMutex.unlock()
+//                delay(config!!.parityDuration)
+//                parityStatusMutex.lock()
+//                parityStatus = false
+//                parityStatusMutex.unlock()
+//
+//            }
+        }
+        if (delayBelowThresTime >= 2) {
+            parityStatus = false
+        }
+        Log.d(
+            TAG,
+            "PAT *** delayNow=${delayNow}, delayOverThresTime=${delayOverThresTime} parityStatus=${parityStatus} ${ack.second}"
+        )
     }
 
     private suspend fun serveInput(inputBuf: ByteBuffer, channelType: String, packetType: Int) =
@@ -617,10 +706,21 @@ class HONFecService(
                 ackMutex.lock()
                 val index = inputBuf.int
                 val packetSendTime = inputBuf.long
+
+                serverDataSendPacketNum = inputBuf.int
+                serverParitySendPacketNum = inputBuf.int
+                serverDataReceivePacketNum = inputBuf.int
+                serverParityReceivePacketNum = inputBuf.int
+                serverRepeatReceivePacketNum = inputBuf.int
+                serverParityStatus = inputBuf.int
+
+
                 for (ack in ackList) {
                     if (ack.second.first == groupId && ack.second.second == index) {
                         ackList.remove(ack)
-
+                        if ((groupId.toInt() * config!!.dataNum + index) % 3 == 0) {
+                            parity_status_fun(ack)
+                        }
                         Log.d(
                             TAG,
                             "ackList remove groupId=$groupId index=$index timeDelta=${System.nanoTime() - ack.first}"
@@ -659,6 +759,13 @@ class HONFecService(
                 var index = inputBuf.int
                 val packetSendTime = inputBuf.long
 
+                serverDataSendPacketNum = inputBuf.int
+                serverParitySendPacketNum = inputBuf.int
+                serverDataReceivePacketNum = inputBuf.int
+                serverParityReceivePacketNum = inputBuf.int
+                serverRepeatReceivePacketNum = inputBuf.int
+                serverParityStatus = inputBuf.int
+
                 if ((config!!.mode == 0 || config!!.mode == 1) && index >= config!!.dataNum + config!!.parityNum) {
                     continue
                 }
@@ -687,12 +794,13 @@ class HONFecService(
                 }
 
                 // 如果是多倍发包，那么该冗余包的index直接转成对应的数据包index
-                if (index >= config!!.dataNum && config!!.mode == 2) {
+                if (index >= config!!.dataNum && (config!!.mode == 2 || config!!.mode == 4)) {
                     index -= config!!.dataNum
                 }
 
                 // 如果该index的包已经接受过，就跳过（目前版本应该不会触发）
                 if (marks[index] == 0) {
+                    repeatReceivePacketNum += 1
                     continue
                 }
 
@@ -778,14 +886,15 @@ class HONFecService(
     }
 
     private suspend fun sendACK(groupID: UInt, index: Int) {
-        val dataChannel =
-            if ((primaryChannel == "Cellular" && isCellularAvailable.get()) || !isWifiAvailable.get()) {
+        val ackChannel =
+//            if ((primaryChannel == "Cellular" && isCellularAvailable.get()) || !isWifiAvailable.get()) {
+            if (primaryChannel == "Cellular") {
                 Log.d(TAG, "dataChannel is Cellular")
                 cellularUdpChannel
             } else {
                 wifiUdpChannel
             }
-        outputSend(groupID, index, null, dataChannel, ACK_PACKET)
+        outputSend(groupID, index, null, ackChannel, ACK_PACKET)
     }
 
     // 把包放进接收队列
@@ -798,7 +907,9 @@ class HONFecService(
         if (rxGroupId > groupID || (rxGroupId == groupID && rxIndex > index)) {
             return@coroutineScope
         }
-        sendACK(groupID, index);
+        if (config!!.mode == 3 || config!!.mode == 4) {
+            sendACK(groupID, index);
+        }
 
         // 按照顺序插到队列里面
         val rxIter = rxList.listIterator()
@@ -903,29 +1014,38 @@ class HONFecService(
             delay(100)
             ackMutex.lock()
             val now = System.nanoTime()
+            Log.d(TAG, "ACK_MUTEX start!!!!!!!!!!!!!!!!!!!!!!!!!")
             while (ackList.isNotEmpty() && now - ackList.first.first > config!!.ackTimeout * 1000) {
                 val timeDelta = now - ackList.first.first
+
                 val ack = ackList.first()
                 val groupId = ack.second.first
                 val index = ack.second.second
-                val packet = IpV4Packet(ByteBuffer.wrap(ack.third))
-                val parityChannel =
-                    if (isWifiAvailable.get() && primaryChannel == "Cellular" || !isCellularAvailable.get()) {
-                        Log.d(TAG, "parityChannel is Wifi")
-                        wifiUdpChannel
-                    } else {
-                        Log.d(TAG, "parityChannel is Cellular")
-                        cellularUdpChannel
-                    }
-                outputSend(
-                    groupId, index, packet.rawData!!, parityChannel, DATA_PACKET
-                )
+                Log.d(TAG, "ACK_MUTEX timeDelta=${timeDelta}, groupId=${groupId}, index=${index}")
+                if (config!!.mode == 3) {
+                    val packet = IpV4Packet(ByteBuffer.wrap(ack.third))
+                    val parityChannel =
+                        if (primaryChannel == "Cellular") {
+//                        if (isWifiAvailable.get() && primaryChannel == "Cellular" || !isCellularAvailable.get()) {
+                            Log.d(TAG, "parityChannel is Wifi")
+                            wifiUdpChannel
+                        } else {
+                            Log.d(TAG, "parityChannel is Cellular")
+                            cellularUdpChannel
+                        }
+                    outputSend(
+                        groupId, index, packet.rawData!!, parityChannel, DATA_PACKET
+                    )
+                } else if (config!!.mode == 4) {
+                    launch { parity_status_fun(ack) }
+                }
                 ackList.removeFirst()
                 Log.d(
                     TAG,
                     "ackTimeout: groupId=${ack.second.first}, index=${ack.second.second}, timeDelta=$timeDelta"
                 )
             }
+            Log.d(TAG, "ACK_MUTEX end!!!!!!!!!!!!!!!!!!!!!!!!!")
             ackMutex.unlock()
         }
     }

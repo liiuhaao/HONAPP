@@ -12,6 +12,8 @@ data class HONConfig(
     var decodeTimeout: Long,
     var rxTimeout: Long,
     var ackTimeout: Long,
+    var parityDelayThres: Long,
+    var parityDuration: Long,
     var primaryProbability: Int,
     var mode: Int,
     var ipAddress: String?,
@@ -22,6 +24,8 @@ data class HONConfig(
         parcel.readInt(),
         parcel.readInt(),
         parcel.readInt(),
+        parcel.readLong(),
+        parcel.readLong(),
         parcel.readLong(),
         parcel.readLong(),
         parcel.readLong(),
@@ -41,6 +45,8 @@ data class HONConfig(
         parcel.writeLong(decodeTimeout)
         parcel.writeLong(rxTimeout)
         parcel.writeLong(ackTimeout)
+        parcel.writeLong(parityDelayThres)
+        parcel.writeLong(parityDuration)
         parcel.writeInt(primaryProbability)
         parcel.writeInt(mode)
         parcel.writeString(ipAddress)
@@ -71,6 +77,8 @@ data class HONConfig(
                 "decodeTimeout=$decodeTimeout," +
                 "rxTimeout=$rxTimeout," +
                 "ackTimeout=$ackTimeout," +
+                "parityDelayThres=$parityDelayThres," +
+                "parityDuration=$parityDuration," +
                 "primaryProbability=$primaryProbability," +
                 "mode=$mode," +
                 "ipAddress='$ipAddress'," +
@@ -89,6 +97,8 @@ data class HONConfig(
                 "decodeTimeout": $decodeTimeout,
                 "rxTimeout": $rxTimeout,
                 "ackTimeout": $ackTimeout,
+                "parityDelayThres": $parityDelayThres,
+                "parityDuration": $parityDuration,
                 "primaryProbability": $primaryProbability,
                 "mode": $mode,
                 "ipAddress": "$ipAddress",

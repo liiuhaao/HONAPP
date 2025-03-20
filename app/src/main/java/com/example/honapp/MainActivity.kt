@@ -63,7 +63,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
-import kotlin.io.path.Path
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.nativeCanvas
 import java.io.IOException
@@ -116,6 +115,8 @@ class MainActivity : ComponentActivity(), CoroutineScope by MainScope() {
                     decodeTimeout = 1000000,
                     rxTimeout = 500000,
                     ackTimeout = 200000,
+                    parityDelayThres = 100,
+                    parityDuration = 1000,
                     primaryProbability = 80,
                     ipAddress = "106.75.223.143",
                     port = "54345",
@@ -125,7 +126,7 @@ class MainActivity : ComponentActivity(), CoroutineScope by MainScope() {
         }
 
         // 模式选项
-        val modeOptions = listOf("自研FEC", "开源RS", "多倍发包", "重传冗余")
+        val modeOptions = listOf("自研FEC", "开源RS", "多倍发包", "重传冗余", "动态多倍")
 
         // ip地址选取
         val ipAddresses = listOf("106.75.223.143")
@@ -134,7 +135,7 @@ class MainActivity : ComponentActivity(), CoroutineScope by MainScope() {
         // 选择那一条路是主路
         val primaryChannel = remember { mutableStateOf("Wifi") }
 
-        val dropModeList = listOf("主路随机丢包", "双路随机丢包")
+        val dropModeList = listOf("主路随机丢包", "双路随机丢包", "主路构造时延")
         var dropMode by remember { mutableStateOf("主路随机丢包") }
 
         // 显示同步状态
@@ -171,6 +172,9 @@ class MainActivity : ComponentActivity(), CoroutineScope by MainScope() {
         var startTimeFormatted by remember { mutableStateOf("") }
         val timeFormatter = SimpleDateFormat("HH:mm:ss", Locale.getDefault())
         var powerConsumption by remember { mutableStateOf(0.0) }
+
+        var parity_delay_thres by remember { mutableStateOf(100) }
+        var parity_duration by remember { mutableStateOf(2000) }
 
         // 好像是用来监听vpnIntent的广播，用来接收数据的，gpt写的
         val context = LocalContext.current
@@ -561,6 +565,7 @@ class MainActivity : ComponentActivity(), CoroutineScope by MainScope() {
 
                         }
 
+                        // 保序超时和ACK超时
                         Row {
                             OutlinedTextField(
                                 value = config.rxTimeout.toString(),
@@ -594,6 +599,41 @@ class MainActivity : ComponentActivity(), CoroutineScope by MainScope() {
                                 singleLine = true,
                             )
                         }
+
+                        Row {
+                            OutlinedTextField(
+                                value = config.parityDelayThres.toString(),
+                                onValueChange = { newValue ->
+                                    val value = newValue.toLongOrNull()
+                                    config = if (value != null) {
+                                        config.copy(parityDelayThres = value)
+                                    } else {
+                                        config.copy(parityDelayThres = 0)
+                                    }
+                                },
+                                label = { Text("弱网时限 (毫秒)") },
+                                modifier = Modifier.weight(1f),
+                                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                                singleLine = true,
+                            )
+                            Spacer(modifier = Modifier.width(10.dp))
+                            OutlinedTextField(
+                                value = config.parityDuration.toString(),
+                                onValueChange = { newValue ->
+                                    val value = newValue.toLongOrNull()
+                                    config = if (value != null) {
+                                        config.copy(parityDuration = value)
+                                    } else {
+                                        config.copy(parityDuration = 0)
+                                    }
+                                },
+                                label = { Text("多倍时长 (毫秒)") },
+                                modifier = Modifier.weight(1f),
+                                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                                singleLine = true,
+                            )
+                        }
+
                         // 保守发包率（暂时没用）和模拟丢包率
                         Row {
                             OutlinedTextField(
@@ -845,22 +885,89 @@ class MainActivity : ComponentActivity(), CoroutineScope by MainScope() {
 //                                    }"
 //                                )
 
-                            Text("wifi发送/接收包个数：${dataMap["wifiSendPacketNum"]}/${dataMap["wifiReceivePacketNum"]}")
-                            Text(
-                                "wifi发送/接收包平均大小：${"%.2f".format(dataMap["wifiSendPacketSize"]?.toDouble() ?: 0.0)}/${
-                                    "%.2f".format(
-                                        dataMap["wifiReceivePacketSize"]?.toDouble() ?: 0.0
-                                    )
-                                }"
-                            )
-                            Text("蜂窝发送/接收包个数：${dataMap["cellularSendPacketNum"]}/${dataMap["cellularReceivePacketNum"]}")
-                            Text(
-                                "蜂窝发送/接收包平均大小：${"%.2f".format(dataMap["cellularSendPacketSize"]?.toDouble() ?: 0.0)}/${
-                                    "%.2f".format(
-                                        dataMap["cellularReceivePacketSize"]?.toDouble() ?: 0.0
-                                    )
-                                }"
-                            )
+
+                            var clientDataSendPacketNum = 0
+                            var clientParitySendPacketNum = 0
+                            var clientDataReceivePacketNum = 0
+
+
+                            Text("客户端")
+                            if (primaryChannel.value == "Wifi") {
+                                Text("数据包发送/接收包个数：${dataMap["wifiSendPacketNum"]}/${dataMap["wifiReceivePacketNum"]}")
+//                                Text(
+//                                    "数据包发送/接收包平均大小：${"%.2f".format(dataMap["wifiSendPacketSize"]?.toDouble() ?: 0.0)}/${
+//                                        "%.2f".format(
+//                                            dataMap["wifiReceivePacketSize"]?.toDouble() ?: 0.0
+//                                        )
+//                                    }"
+//                                )
+                                Text("冗余包发送/接收包个数：${dataMap["cellularSendPacketNum"]}/${dataMap["cellularReceivePacketNum"]}")
+//                                Text(
+//                                    "冗余包发送/接收包平均大小：${"%.2f".format(dataMap["cellularSendPacketSize"]?.toDouble() ?: 0.0)}/${
+//                                        "%.2f".format(
+//                                            dataMap["cellularReceivePacketSize"]?.toDouble() ?: 0.0
+//                                        )
+//                                    }"
+//                                )
+                                clientDataSendPacketNum =
+                                    dataMap["wifiSendPacketNum"]!!.toInt()
+                                clientParitySendPacketNum =
+                                    dataMap["cellularSendPacketNum"]!!.toInt()
+                                clientDataReceivePacketNum =
+                                    dataMap["wifiReceivePacketNum"]!!.toInt()
+                            } else {
+                                Text("数据包发送/接收包个数：${dataMap["cellularSendPacketNum"]}/${dataMap["cellularReceivePacketNum"]}")
+                                Text(
+                                    "数据包发送/接收包平均大小：${"%.2f".format(dataMap["cellularSendPacketSize"]?.toDouble() ?: 0.0)}/${
+                                        "%.2f".format(
+                                            dataMap["cellularReceivePacketSize"]?.toDouble() ?: 0.0
+                                        )
+                                    }"
+                                )
+                                Text("冗余包发送/接收包个数：${dataMap["wifiSendPacketNum"]}/${dataMap["wifiReceivePacketNum"]}")
+                                Text(
+                                    "冗余包发送/接收包平均大小：${"%.2f".format(dataMap["wifiSendPacketSize"]?.toDouble() ?: 0.0)}/${
+                                        "%.2f".format(
+                                            dataMap["wifiReceivePacketSize"]?.toDouble() ?: 0.0
+                                        )
+                                    }"
+                                )
+                                clientDataSendPacketNum =
+                                    dataMap["cellularSendPacketNum"]!!.toInt()
+                                clientParitySendPacketNum =
+                                    dataMap["wifiSendPacketNum"]!!.toInt()
+                                clientDataReceivePacketNum =
+                                    dataMap["cellularReceivePacketNum"]!!.toInt()
+                            }
+                            Text("重复接受包个数：${dataMap["repeatReceivePacketNum"]}")
+                            Text("冗余度 : 无用冗余度（当前模式 下行）")
+                            Text("${dataMap["serverParitySendPacketNum"]!!.toFloat() / dataMap["serverDataSendPacketNum"]!!.toFloat()} : ${dataMap["repeatReceivePacketNum"]!!.toFloat() / dataMap["serverParitySendPacketNum"]!!.toFloat()}")
+                            Text("冗余度 : 无用冗余度（多倍发包 下行）")
+                            Text("1 : ${clientDataReceivePacketNum.toFloat() / dataMap["serverDataSendPacketNum"]!!.toFloat()}")
+
+
+                            Text("")
+                            Text("服务端")
+                            Text("数据包发送/接收包个数：${dataMap["serverDataSendPacketNum"]}/${dataMap["serverDataReceivePacketNum"]}")
+                            Text("冗余包发送/接收包个数：${dataMap["serverParitySendPacketNum"]}/${dataMap["serverParityReceivePacketNum"]}")
+                            Text("重复接受包个数：${dataMap["serverRepeatReceivePacketNum"]}")
+                            Text("冗余度 : 无用冗余度（当前模式 上行）")
+                            Text("${clientParitySendPacketNum.toFloat() / clientDataSendPacketNum.toFloat()} : ${dataMap["serverRepeatReceivePacketNum"]!!.toFloat() / clientParitySendPacketNum.toFloat()}")
+                            Text("冗余度 : 无用冗余度（多倍发包 上行）")
+                            Text("1 : ${dataMap["serverDataReceivePacketNum"]!!.toFloat() / clientDataSendPacketNum.toFloat()}")
+
+
+
+                            Text("")
+                            Text("")
+                            Text("")
+                            Text("")
+                            Text("")
+                            Text("")
+                            Text("")
+                            Text("")
+                            Text("ClientParityStatus: ${dataMap["parityStatus"]}")
+                            Text("ServerParityStatus: ${dataMap["serverParityStatus"]}")
                         }
 
 
@@ -1161,7 +1268,6 @@ class MainActivity : ComponentActivity(), CoroutineScope by MainScope() {
         packetSize: Int,
     ): Long {
         val start = System.currentTimeMillis()
-//        val socket = Socket(serverAddress, serverPort)
         try {
             val outStream = DataOutputStream(socket.getOutputStream())
             val inStream = DataInputStream(socket.getInputStream())
@@ -1170,11 +1276,8 @@ class MainActivity : ComponentActivity(), CoroutineScope by MainScope() {
             outStream.flush()
             inStream.readFully(ByteArray(packetSize))
         } catch (e: IOException) {
-            e.printStackTrace() // 或者记录日志，避免直接打印
+            e.printStackTrace()
         }
-//        outStream.close()
-//        inStream.close()
-//        socket.close()
         val end = System.currentTimeMillis()
         return end - start
     }
